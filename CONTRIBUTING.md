@@ -19,7 +19,7 @@ The [README quick start](README.md#quick-start) runs the whole stack locally
 with Docker. Before you open a pull request, run the same checks as CI:
 
 ```bash
-docker compose up -d --wait && source ./local.env
+docker compose up -d --wait postgres s3 && source ./local.env
 go vet ./... && go test ./... -count=1
 npm --prefix web/admin ci && npm --prefix web/admin run build && npm --prefix web/admin test
 npm --prefix sdk ci && npm --prefix sdk test
@@ -27,6 +27,15 @@ npm --prefix sdk ci && npm --prefix sdk test
 
 If you change `api/openapi.yaml`, regenerate the server code with
 `go generate ./internal/api` and commit the result.
+
+Schema changes go in a new file under `internal/platform/migrations/`; never
+edit one that has been merged, because deployments have already applied it.
+Keep each change forward-compatible (add, then use, then drop in a later
+release) so a rolling deploy can run old and new code against one schema.
+
+Every query on organization data filters on the caller's organization, and
+the database cannot check that for reads. When you add an endpoint that reads
+something by id, add a cross-organization case to `cmd/server/authz_test.go`.
 
 ## Licensing of your contribution
 

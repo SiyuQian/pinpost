@@ -890,12 +890,12 @@
           <p class="hero__kicker">Architecture Brief</p>
           <h1 id="page-title">跨平台反馈系统设计</h1>
           <p class="hero__lead">
-            React Native 与 React 共享反馈协议和提交核心，各自提供平台原生 UI；Go 模块化单体跑在 Lambda 上，配合 DynamoDB 单表与 S3 直传，完成可靠采集与处理闭环。
+            React Native 与 React 共享反馈协议和提交核心，各自提供平台原生 UI；Go 模块化单体打包成一个容器，配合 PostgreSQL 与 S3 兼容对象存储直传，<code>docker compose up</code> 即可自部署，完成可靠采集与处理闭环。
           </p>
           <div class="hero__meta" aria-label="文档信息">
             <span class="meta-pill">Phase 1 Shipped</span>
             <span class="meta-pill">Shared Core · Native UI</span>
-            <span class="meta-pill">Go on Lambda · Single Table</span>
+            <span class="meta-pill">Go · PostgreSQL · Docker Compose</span>
             <span class="meta-pill">20 Chapters</span>
           </div>
         </section>
@@ -908,13 +908,13 @@
           </article>
           <article class="summary-card">
             <span class="summary-card__number">01</span>
-            <span class="summary-card__label">DynamoDB 单表</span>
-            <span class="summary-card__detail">一个稀疏索引，TTL 自动过期，任何路径上都没有 Scan</span>
+            <span class="summary-card__label">PostgreSQL</span>
+            <span class="summary-card__detail">外键与唯一约束守住租户和幂等，事件与业务写入同一事务</span>
           </article>
           <article class="summary-card">
-            <span class="summary-card__number">03</span>
-            <span class="summary-card__label">Lambda 函数</span>
-            <span class="summary-card__detail">API、附件扫描、Webhook 投递；无常驻实例、无 VPC</span>
+            <span class="summary-card__number">01</span>
+            <span class="summary-card__label">容器</span>
+            <span class="summary-card__detail">API、附件扫描、Webhook 投递在同一进程；多副本靠 SKIP LOCKED 协作</span>
           </article>
         </section>
 
