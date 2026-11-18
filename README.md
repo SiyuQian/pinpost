@@ -178,7 +178,7 @@ Dashboard (session cookie):
 - `GET  /v1/attachments/{id}/download` (only scan=clean; 302 to a 60-second presigned URL)
 - `GET  /v1/projects` `/members` `/analytics/overview`
 
-Tenant isolation is structural rather than a `WHERE` clause everyone must remember: every organization-scoped item lives under the partition key `ORG#<orgId>`, so a cross-tenant read cannot be expressed. Reads outside the caller's organization return 404.
+Organization-scoped reads and writes are filtered by `organization_id`, taken from the caller's session or write key (child records such as activities are reached only through their organization-checked parent), so reads outside the caller's organization return 404. See [Data model](#data-model) for how cross-organization references are prevented on writes and tested on reads.
 
 ## Data model
 
