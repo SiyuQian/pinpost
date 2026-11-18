@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -165,10 +166,12 @@ func (s *Service) post(ctx context.Context, d due) result {
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	code := resp.StatusCode
+	// Postgres text rejects invalid UTF-8 and NUL, and the 1024-byte cut can split a rune.
+	cleanBody := strings.ToValidUTF8(strings.ReplaceAll(string(respBody), "\x00", ""), "\uFFFD")
 	return result{
 		ok: code >= 200 && code < 300,
 		// Retry 5xx, 408, 429; other 4xx are permanent (design §11.2).
 		retryable: code >= 500 || code == 408 || code == 429,
-		status:    &code, body: string(respBody), latency: &latency,
+		status:    &code, body: cleanBody, latency: &latency,
 	}
 }
