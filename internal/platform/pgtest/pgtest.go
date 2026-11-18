@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/SiyuQian/pinpost/internal/platform"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -54,7 +55,7 @@ func Schema(t testing.TB) *pgxpool.Pool {
 		t.Fatalf("create schema: %v", err)
 	}
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	pool, err := pgxpool.NewWithConfig(ctx, platform.ScanUTC(cfg))
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
@@ -74,4 +75,20 @@ func New(t testing.TB) *pgxpool.Pool {
 		t.Fatalf("migrate: %v", err)
 	}
 	return pool
+}
+
+// Tenant inserts an organization with one project and returns both ids, for
+// tests that need somewhere for feedback to live.
+func Tenant(t testing.TB, db *pgxpool.Pool) (orgID, projectID string) {
+	t.Helper()
+	orgID, projectID = uuid.NewString(), uuid.NewString()
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, `INSERT INTO organizations (id, name) VALUES ($1, 'Test Org')`, orgID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO projects (id, organization_id, name, environment, write_key)
+		VALUES ($1, $2, 'Test Project', 'development', $3)`, projectID, orgID, "wk_"+projectID); err != nil {
+		t.Fatal(err)
+	}
+	return orgID, projectID
 }

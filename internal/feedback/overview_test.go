@@ -2,51 +2,26 @@ package feedback
 
 import (
 	"context"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/google/uuid"
 )
 
-func newOverviewStore(t *testing.T) *platform.Store {
-	t.Helper()
-	if os.Getenv("AWS_ENDPOINT_URL") == "" {
-		os.Setenv("AWS_ENDPOINT_URL", "http://localhost:8000")
-	}
-	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-		os.Setenv("AWS_ACCESS_KEY_ID", "pinpost")
-		os.Setenv("AWS_SECRET_ACCESS_KEY", "pinpost-secret")
-	}
-	cfg, err := platform.AWSConfig(context.Background())
-	if err != nil {
+// The overview is two GROUP BY queries; the counts are asserted against
+// seeded rows, including one outside the 14-day trend window and one in
+// another project.
+func TestOverviewCounts(t *testing.T) {
+	ctx := context.Background()
+	db := pgtest.New(t)
+	svc := &Service{DB: db}
+	orgID, mine := pgtest.Tenant(t, db)
+	other := uuid.NewString()
+	if _, err := db.Exec(ctx, `INSERT INTO projects (id, organization_id, name, environment, write_key)
+		VALUES ($1, $2, 'Other', 'development', $3)`, other, orgID, "wk_"+other); err != nil {
 		t.Fatal(err)
 	}
-	name := "pinpost-overview-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
-	store := platform.NewStore(cfg, name)
-	if err := platform.EnsureTable(context.Background(), store); err != nil {
-		pgtest.Unavailable(t, "dynamodb unreachable: %v", err)
-	}
-	t.Cleanup(func() {
-		store.DB.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: &name})
-	})
-	return store
-}
-
-// The aggregate is read through a ProjectionExpression with name placeholders
-// for the reserved words `status` and `type`, and the counting fields are
-// unmarshalled straight into `counted`. A wrong attribute name there does not
-// error — it yields zero-valued rows and a silently empty dashboard — so the
-// counts are asserted against seeded records rather than the shape alone.
-func TestOverviewCountsProjectedRows(t *testing.T) {
-	store := newOverviewStore(t)
-	svc := &Service{Store: store}
-	orgID := uuid.NewString()
-	other, mine := uuid.NewString(), uuid.NewString()
 
 	seed := []struct {
 		projectID, status, kind string
@@ -62,18 +37,15 @@ func TestOverviewCountsProjectedRows(t *testing.T) {
 	}
 	for _, s := range seed {
 		id := uuid.Must(uuid.NewV7()).String()
-		item := &Item{
-			Key: itemKey(orgID, id), FeedbackID: id, OrganizationID: orgID,
-			ProjectID: s.projectID, Type: s.kind, Message: "seeded", Status: s.status,
-			Priority: "none", CreatedAt: time.Now().UTC().Add(-s.age),
-			UpdatedAt: time.Now().UTC(),
-		}
-		if err := store.Put(context.Background(), item); err != nil {
+		if _, err := db.Exec(ctx, `INSERT INTO feedback
+			(id, organization_id, project_id, idempotency_key, type, message, status, created_at)
+			VALUES ($1, $2, $3, $4, $5, 'seeded', $6, $7)`,
+			id, orgID, s.projectID, id, s.kind, s.status, time.Now().Add(-s.age)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	all, err := svc.Overview(context.Background(), orgID, "")
+	all, err := svc.Overview(ctx, orgID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,29 +53,29 @@ func TestOverviewCountsProjectedRows(t *testing.T) {
 		t.Fatalf("total = %d, want 5", all.Total)
 	}
 	if all.ByStatus["open"] != 3 || all.ByStatus["resolved"] != 1 || all.ByStatus["spam"] != 1 {
-		t.Fatalf("by_status = %v, want the projected status attribute counted", all.ByStatus)
+		t.Fatalf("by_status = %v", all.ByStatus)
 	}
 	if all.ByType["bug"] != 3 || all.ByType["suggestion"] != 1 || all.ByType["other"] != 1 {
-		t.Fatalf("by_type = %v, want the projected type attribute counted", all.ByType)
-	}
-	// Four rows inside the 14-day window, three of them today.
-	if len(all.Trend) == 0 {
-		t.Fatalf("trend = %v, want the projected created_at bucketed", all.Trend)
+		t.Fatalf("by_type = %v", all.ByType)
 	}
 	var trended int
 	for _, day := range all.Trend {
 		trended += day["count"].(int)
 	}
 	if trended != 4 {
-		t.Fatalf("trend total = %d, want 4 rows inside the window", trended)
+		t.Fatalf("trend total = %d (%v), want 4 rows inside the window", trended, all.Trend)
 	}
 
-	// The scope is applied to the cached rows, not by re-reading the partition.
-	scoped, err := svc.Overview(context.Background(), orgID, mine)
+	scoped, err := svc.Overview(ctx, orgID, mine)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if scoped.Total != 4 || scoped.ByStatus["open"] != 2 {
 		t.Fatalf("scoped = %+v, want only the four rows of one project", scoped)
+	}
+
+	// Another organization sees nothing.
+	if none, err := svc.Overview(ctx, uuid.NewString(), ""); err != nil || none.Total != 0 {
+		t.Fatalf("foreign org overview = %+v, err %v", none, err)
 	}
 }

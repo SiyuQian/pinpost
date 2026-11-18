@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/SiyuQian/pinpost/internal/api"
@@ -33,12 +36,12 @@ func env(key, fallback string) string {
 // newServer wires the domain slices behind the generated spec router.
 // Shared with the contract test, which also reaches into the slices directly.
 func newServer(store *platform.Store, db *pgxpool.Pool, s3c *s3.Client, bucket string) *api.Server {
-	att := &attachment.Service{Store: store, S3: s3c, Presign: s3.NewPresignClient(s3c), Bucket: bucket}
+	att := &attachment.Service{DB: db, S3: s3c, Presign: s3.NewPresignClient(s3c), Bucket: bucket}
 	proj := &project.Service{DB: db}
 	return &api.Server{
 		Auth:          &auth.Service{DB: db},
 		Project:       proj,
-		Feedback:      &feedback.Service{Store: store, Attachment: att, Members: proj},
+		Feedback:      &feedback.Service{DB: db, Attachment: att, Members: proj},
 		Attachment:    att,
 		Outbox:        &outbox.Service{Store: store},
 		IngestLimiter: platform.NewRateLimiter(store, ingestLimit()),
@@ -74,10 +77,10 @@ func newMux(srv *api.Server) *http.ServeMux {
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})
-	// Local development has no S3 event notification, so attachments would
-	// stay pending forever. Off in any deployed stack, where the scan Lambda
-	// does this.
-	if os.Getenv("S3_ENDPOINT_URL") != "" {
+	// Scans an attachment now instead of when the background worker gets to
+	// it, for local tooling (the SDK's e2e test). Mounted only alongside the
+	// demo tenant, which is local development by definition.
+	if os.Getenv("PINPOST_SEED_DEMO") == "1" {
 		mux.Handle("POST /dev/scan/{id}", platform.Handler(func(w http.ResponseWriter, r *http.Request) error {
 			if err := srv.Attachment.VerifyByID(r.Context(), r.PathValue("id")); err != nil {
 				return err
@@ -153,9 +156,40 @@ func seed(ctx context.Context, db *pgxpool.Pool) error {
 	})
 }
 
+// runBackground does what S3 events and table TTLs used to: it scans
+// attachments every couple of seconds and sweeps expired rows every ten
+// minutes, until ctx ends. Every replica runs it; ScanDue claims rows with
+// SKIP LOCKED, so they never work the same row twice.
+func runBackground(ctx context.Context, srv *api.Server) {
+	scan := time.NewTicker(2 * time.Second)
+	sweep := time.NewTicker(10 * time.Minute)
+	defer scan.Stop()
+	defer sweep.Stop()
+	report := func(what string, err error) {
+		if err != nil && ctx.Err() == nil {
+			slog.Error(what+" failed", "error", err)
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-scan.C:
+			_, err := srv.Attachment.ScanDue(ctx)
+			report("attachment scan", err)
+		case <-sweep.C:
+			report("session sweep", srv.Auth.SweepExpiredSessions(ctx))
+			report("attachment sweep", srv.Attachment.SweepUnclaimed(ctx))
+		}
+	}
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-	ctx := context.Background()
+	// SIGTERM (docker stop, a rolling deploy) stops the background loop and
+	// drains in-flight requests before the process exits.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	cfg, err := platform.AWSConfig(ctx)
 	if err != nil {
@@ -193,7 +227,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	mux := newMux(newServer(store, db, s3c, bucket))
+	server := newServer(store, db, s3c, bucket)
+	mux := newMux(server)
 
 	// The browser SDK posts from customer origins; the admin console does not.
 	origins := strings.Split(env("CORS_ALLOWED_ORIGINS", ""), ",")
@@ -207,9 +242,23 @@ func main() {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
+	background := make(chan struct{})
+	go func() {
+		runBackground(ctx, server)
+		close(background)
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdown)
+	}()
 	slog.Info("pinpost server listening", "addr", addr, "admin", "http://localhost"+addr+"/admin/", "demo", "http://localhost"+addr+"/demo/")
-	if err := srv.ListenAndServe(); err != nil {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server exited", "error", err)
 		os.Exit(1)
 	}
+	<-background
+	db.Close()
+	slog.Info("pinpost server stopped")
 }

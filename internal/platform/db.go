@@ -5,9 +5,11 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,7 +30,11 @@ type DBTX interface {
 // OpenDB connects to PostgreSQL and checks the connection, so a bad
 // DATABASE_URL fails at boot rather than on the first request.
 func OpenDB(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, ScanUTC(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -37,6 +43,18 @@ func OpenDB(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 	return pool, nil
+}
+
+// ScanUTC makes timestamps come back in UTC, whatever the server's or this
+// process's time zone. The API has always rendered them with a Z suffix, and
+// an updated_at echoed back as a concurrency token compares by instant anyway.
+func ScanUTC(cfg *pgxpool.Config) *pgxpool.Config {
+	cfg.AfterConnect = func(_ context.Context, conn *pgx.Conn) error {
+		conn.TypeMap().RegisterType(&pgtype.Type{Name: "timestamptz", OID: pgtype.TimestamptzOID,
+			Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC}})
+		return nil
+	}
+	return cfg
 }
 
 // Migrate applies every *.sql file in fsys that has not been applied yet, in

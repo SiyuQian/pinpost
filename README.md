@@ -45,11 +45,11 @@ All optional; the defaults suit local development.
 | `PINPOST_TABLE` | `pinpost` | DynamoDB table name |
 | `PINPOST_BUCKET` | `pinpost-attachments` | S3 bucket for attachments |
 | `AWS_ENDPOINT_URL` | *(real AWS)* | DynamoDB endpoint. Setting it means local development: the table is created on boot. |
-| `S3_ENDPOINT_URL` | *(real AWS)* | Object storage endpoint. Setting it means local S3 (RustFS): path-style addressing, bucket created on boot, and the dev scan route mounted (local has no S3 event notification). |
+| `S3_ENDPOINT_URL` | *(real AWS)* | Object storage endpoint. Setting it means local S3 (RustFS): path-style addressing and the bucket created on boot. |
 | `ADDR` | `:8787` | Listen address |
 | `PINPOST_RATE_LIMIT` | `60` | Ingestion requests per project+IP per minute. The IP is the leftmost `X-Forwarded-For` hop, falling back to the socket peer. |
 | `CORS_ALLOWED_ORIGINS` | *(any origin)* | Comma-separated origin allowlist for the public ingestion endpoints. The write key is public by design, so this is hygiene rather than a security boundary. Attachment bytes are not covered — they go straight to S3, whose own CORS configuration governs them. |
-| `PINPOST_SEED_DEMO` | `0` | Set to `1` for the demo tenant above. Local development only. |
+| `PINPOST_SEED_DEMO` | `0` | Set to `1` for the demo tenant above. It also mounts `POST /dev/scan/{id}`, which scans one attachment immediately. Local development only. |
 | `PINPOST_GOOGLE_CLIENT_ID` | — | Google OAuth **web** client id. Empty disables Google sign-in and hides the button. |
 | `PINPOST_GOOGLE_ALLOWED_EMAILS` | — | Comma-separated Google addresses allowed to sign in. This is the access control: an allowed address gets an `admin` member record on first sign-in, anything else is rejected. Empty means nobody. |
 | `PINPOST_ADMIN_EMAIL` / `PINPOST_ADMIN_PASSWORD` | — | Provisions the first owner on an empty database. Ignored once seeding has run (the one row in the `bootstrap` table records it; `DELETE FROM bootstrap` allows a re-seed). With no `PINPOST_ADMIN_EMAIL`, the first allowlisted Google address is seeded as owner with no usable password. |
@@ -213,10 +213,10 @@ add the sparse `GSI2PK = ORG#<org>#STATUS#<s>` index.
 
 ## Boundaries
 
-- Attachment scanning is a signature scan (EICAR, executables, image polyglots), not an AV engine; it runs in `cmd/scan` after the object lands, and the interface is where a real engine would slot in. Flagged and mislabeled files are stored but blocked from download.
+- Attachment scanning is a signature scan (EICAR, executables, image polyglots), not an AV engine; the server's background worker runs it within a few seconds of a submission claiming the attachment, and the interface is where a real engine would slot in. Flagged and mislabeled files are stored but blocked from download. An attachment whose object never arrives is marked `rejected` after an hour.
 - **Verification is now after the fact.** A file whose real type does not match the declared one used to be refused with a 400 during upload; it now lands in the bucket and is marked `rejected`. Attachments are briefly `pending` — a status the dashboard shows and the download endpoint refuses.
 - Attachments are linked to feedback whether or not the scan has finished. The design gates the link on `upload_status = "uploaded"`, but the SDK can submit within milliseconds of the upload, and losing a user's feedback to that race is worse than showing a `pending` attachment; download is still gated on `clean`.
-- Objects whose feedback submission never arrived stay in the bucket. Their DynamoDB item expires (24h TTL), so they are invisible and unreferenced, but S3 cannot see the claim and expiring them needs stream-driven object tagging. Add it when the orphan bytes cost something.
+- Objects whose feedback submission never arrived stay in the bucket. Their row is swept after 24 hours, so they are invisible and unreferenced; deleting the object in the same sweep is the upgrade when the orphan bytes cost something.
 - Email / one-tap screenshot / cross-restart offline queue are Phase 2.
 
 ## Deploying
