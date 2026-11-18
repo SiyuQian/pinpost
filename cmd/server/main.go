@@ -162,8 +162,7 @@ func main() {
 		os.Exit(1)
 	}
 	store := platform.NewStore(cfg, env("PINPOST_TABLE", "pinpost"))
-	// Deployments declare the table in infrastructure/terraform/modules/pinpost/dynamodb.tf; a custom endpoint means
-	// DynamoDB Local. The container is in-memory, so the table survives server
+	// A custom endpoint means DynamoDB Local. The container is in-memory, so the table survives server
 	// restarts but not `docker compose down` — which is why seed.go pins the
 	// demo UUIDs instead of generating them.
 	if os.Getenv("AWS_ENDPOINT_URL") != "" {

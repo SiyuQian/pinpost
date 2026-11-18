@@ -58,8 +58,8 @@ func NewStore(cfg aws.Config, table string) *Store {
 // EnsureTable creates the table, with GSI1, when the table does not exist. It
 // does not repair an existing table: a table left over from an older schema is
 // left alone, and it never enables the expires_at TTL, so locally nothing
-// expires. Production declares all of that in infrastructure/terraform/modules/pinpost/dynamodb.tf; this is what
-// local development and the contract test call instead of running migrations.
+// expires. Local development and the tests call this instead of running
+// migrations.
 func EnsureTable(ctx context.Context, s *Store) error {
 	_, err := s.DB.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &s.Table})
 	if err == nil {
@@ -197,8 +197,8 @@ func ConditionFailed(err error) bool {
 	return errors.As(err, &cc)
 }
 
-// EnsureBucket creates the attachment bucket if it is missing. Deployments
-// declare it in infrastructure/terraform/modules/pinpost/s3.tf; this is for the local RustFS container.
+// EnsureBucket creates the attachment bucket if it is missing; this is for the
+// local RustFS container.
 func EnsureBucket(ctx context.Context, client *s3.Client, bucket string) error {
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: &bucket})
 	var owned *s3types.BucketAlreadyOwnedByYou

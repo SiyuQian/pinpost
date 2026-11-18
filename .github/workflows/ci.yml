@@ -35,21 +35,6 @@ jobs:
           AWS_ACCESS_KEY_ID: pinpost
           AWS_SECRET_ACCESS_KEY: pinpost-secret
 
-  # The Terraform config is never exercised by the test job, so nothing else
-  # catches a bad reference or a wrong attribute until `terraform apply` fails
-  # against a real account.
-  infrastructure:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Terraform
-        run: |
-          curl -fsSL https://releases.hashicorp.com/terraform/1.14.8/terraform_1.14.8_linux_amd64.zip -o /tmp/tf.zip
-          sudo unzip -oq /tmp/tf.zip -d /usr/local/bin
-      - run: terraform -chdir=infrastructure/terraform fmt -check -recursive
-      - run: terraform -chdir=infrastructure/terraform/example init -backend=false
-      - run: terraform -chdir=infrastructure/terraform/example validate
-
   web:
     runs-on: ubuntu-latest
     steps:

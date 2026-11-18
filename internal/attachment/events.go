@@ -2,34 +2,14 @@ package attachment
 
 import (
 	"context"
-	"log/slog"
-	"net/url"
 
 	"github.com/SiyuQian/pinpost/internal/platform"
-	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// HandleS3Event verifies every newly uploaded object. Wired to the bucket's
-// ObjectCreated notification; a returned error makes Lambda retry the record.
-func (s *Service) HandleS3Event(ctx context.Context, e events.S3Event) error {
-	for _, r := range e.Records {
-		key, err := url.QueryUnescape(r.S3.Object.Key)
-		if err != nil {
-			slog.Error("undecodable object key", "key", r.S3.Object.Key, "error", err)
-			continue
-		}
-		if err := s.Verify(ctx, key, r.S3.Object.Size); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // VerifyByID re-runs verification for a single attachment, reading the
-// object's current size itself. The deployed stack never calls it — the S3
-// event carries the size — but local development has no event wiring, so
+// object's current size itself. Local development has no event wiring, so
 // cmd/server exposes it on a dev-only route.
 func (s *Service) VerifyByID(ctx context.Context, attID string) error {
 	var it Item
