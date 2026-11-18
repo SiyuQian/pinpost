@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // GoogleConfig gates Google Sign-In. An empty ClientID disables the endpoint
@@ -89,7 +91,7 @@ func verifyGoogleIDToken(ctx context.Context, credential string) (*googleTokenIn
 
 // LoginWithGoogle exchanges a Google ID token for a dashboard session. The
 // allowlist is the access control: a member row is created on first sign-in so
-// nobody has to hand-write DynamoDB items to onboard an allowed address.
+// nobody has to hand-write SQL to onboard an allowed address.
 //
 // The allowlist is consulted on every sign-in, so removing an address stops the
 // next one. It does not reach sessions already issued — those run out with the
@@ -142,7 +144,9 @@ func (s *Service) memberForGoogle(ctx context.Context, email, name, picture stri
 					item.Name = name
 				}
 				item.Picture = picture
-				if err := s.Store.Put(ctx, item); err != nil {
+				if _, err := s.DB.Exec(ctx, `UPDATE members SET name = $3, picture = $4
+					WHERE organization_id = $1 AND id = $2`,
+					item.OrganizationID, item.MemberID, item.Name, item.Picture); err != nil {
 					return nil, err
 				}
 			}
@@ -167,26 +171,21 @@ func (s *Service) memberForGoogle(ctx context.Context, email, name, picture stri
 	// because bcrypt rejects an empty hash for every candidate password.
 	item := NewMemberItem(orgID, uuid.Must(uuid.NewV7()).String(), email, name, "admin", "")
 	item.Picture = picture
-	if err := s.Store.Put(ctx, item); err != nil {
+	if err := InsertMember(ctx, s.DB, item); err != nil {
 		return nil, err
 	}
 	return item, nil
 }
 
-// bootstrapOrgID reads the organization stamped on the seed marker. There is
+// bootstrapOrgID reads the organization recorded by the seed. There is
 // exactly one organization in this deployment; when that stops being true this
 // has to become an explicit choice instead of a lookup.
 func (s *Service) bootstrapOrgID(ctx context.Context) (string, error) {
-	var marker struct {
-		OrganizationID string `dynamodbav:"org_id"`
-	}
-	found, err := s.Store.Get(ctx, platform.BootstrapMarker, platform.Meta, &marker)
-	if err != nil {
-		return "", err
-	}
-	if !found || marker.OrganizationID == "" {
+	var orgID string
+	err := s.DB.QueryRow(ctx, `SELECT organization_id FROM bootstrap`).Scan(&orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", platform.Errf(503, "not_provisioned",
 			"This deployment has no organization yet; seed it before signing in")
 	}
-	return marker.OrganizationID, nil
+	return orgID, err
 }

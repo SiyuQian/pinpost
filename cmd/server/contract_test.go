@@ -31,6 +31,7 @@ import (
 	"github.com/getkin/kin-openapi/routers"
 	"github.com/getkin/kin-openapi/routers/gorillamux"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type contractClient struct {
@@ -40,6 +41,7 @@ type contractClient struct {
 	router routers.Router
 	http   *http.Client
 	store  *platform.Store
+	db     *pgxpool.Pool
 	srv    *api.Server
 	bucket string
 	// covered maps "METHOD /spec/path" to the set of status codes the suite
@@ -73,7 +75,8 @@ func newContractClient(t *testing.T) *contractClient {
 	if err := platform.EnsureTable(ctx, store); err != nil {
 		pgtest.Unavailable(t, "dynamodb unreachable, skipping contract test: %v", err)
 	}
-	if err := project.SeedDemo(ctx, store); err != nil {
+	db := pgtest.New(t)
+	if err := project.SeedDemo(ctx, db); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -99,7 +102,7 @@ func newContractClient(t *testing.T) *contractClient {
 		t.Fatalf("spec invalid: %v", err)
 	}
 
-	srv := newServer(store, s3c, testBucket)
+	srv := newServer(store, db, s3c, testBucket)
 	ts := httptest.NewServer(newMux(srv))
 	t.Cleanup(ts.Close)
 	doc.Servers = openapi3.Servers{{URL: ts.URL}}
@@ -114,7 +117,7 @@ func newContractClient(t *testing.T) *contractClient {
 			// The download endpoint answers 302 to a presigned URL; the test
 			// asserts on the redirect itself.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		store: store, srv: srv, bucket: testBucket, covered: map[string]map[int]bool{}}
+		store: store, db: db, srv: srv, bucket: testBucket, covered: map[string]map[int]bool{}}
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -578,7 +581,7 @@ func TestAPIContract(t *testing.T) {
 	// A viewer role cannot modify feedback.
 	viewerEmail := "viewer@example.com"
 	orgID := jsonField(t, loginBody, "member", "OrganizationID")
-	if _, err := project.AddMember(context.Background(), c.store, orgID,
+	if _, err := project.AddMember(context.Background(), c.db, orgID,
 		viewerEmail, "Contract Viewer", "viewer", "viewer-pass"); err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +647,7 @@ func TestAPIContract(t *testing.T) {
 	// Rate limiting: hammer the cheapest write-key endpoint until 429. The
 	// counter is keyed per project, so a throwaway tenant keeps this from
 	// starving the demo tenant the rest of the suite uses.
-	limitKey, err := project.Provision(context.Background(), c.store, project.Params{
+	limitKey, err := project.Provision(context.Background(), c.db, project.Params{
 		OrgName: "Rate Limit Probe", ProjectName: "Probe", Environment: "development",
 		Email: "probe-" + uuid.NewString() + "@pinpost.test", Password: uuid.NewString(),
 	})

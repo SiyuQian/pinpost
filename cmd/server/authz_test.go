@@ -24,7 +24,7 @@ const (
 // Fixed identifiers keep reruns against a persistent local table idempotent.
 func seedOrgB(t *testing.T, c *contractClient) {
 	t.Helper()
-	if _, err := project.Provision(context.Background(), c.store, project.Params{
+	if _, err := project.Provision(context.Background(), c.db, project.Params{
 		OrgID:     "01900000-0000-7000-8000-0000000000b1",
 		ProjectID: "01900000-0000-7000-8000-0000000000b2",
 		MemberID:  "01900000-0000-7000-8000-0000000000b3",

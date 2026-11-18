@@ -33,11 +33,6 @@ type Key struct {
 // Meta is the sort key for entities that have exactly one item per partition.
 const Meta = "#META"
 
-// BootstrapMarker is the partition key of the one item whose existence means
-// "this deployment has been seeded". It also carries the seeded organization's
-// id, so a first-time Google sign-in knows which organization to join.
-const BootstrapMarker = "#BOOTSTRAP"
-
 // AWSConfig loads credentials/region and honours AWS_ENDPOINT_URL so the whole
 // stack can point at DynamoDB Local and RustFS without any code branch.
 func AWSConfig(ctx context.Context) (aws.Config, error) {
@@ -129,43 +124,6 @@ func (s *Store) Put(ctx context.Context, item any) error {
 		return err
 	}
 	_, err = s.DB.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.Table, Item: av})
-	return err
-}
-
-// PutAll writes several items as one all-or-nothing TransactWriteItems.
-// Entities stored as more than one item — a project's org-partition record and
-// its WK#<digest> ingestion copy — must be committed together: a Put-then-Put
-// sequence that fails halfway publishes a project the listing shows but no
-// write key can reach, and the store has no way to tell it apart from a
-// healthy one afterwards. Every multi-item write goes through here.
-//
-// ponytail: DynamoDB caps a transaction at 100 items; every caller here writes
-// a handful. Split into batches if one ever needs more.
-func (s *Store) PutAll(ctx context.Context, items ...any) error {
-	return s.PutAndDelete(ctx, nil, items...)
-}
-
-// PutAndDelete is PutAll plus deletes in the same transaction — how a write
-// key rotates: the old WK#<digest> copy must vanish in the same commit that
-// publishes the new one, or a failure halfway leaves two keys accepting
-// ingestion for one project.
-func (s *Store) PutAndDelete(ctx context.Context, deletes []Key, items ...any) error {
-	tx := make([]types.TransactWriteItem, 0, len(items)+len(deletes))
-	for _, item := range items {
-		av, err := Marshal(item)
-		if err != nil {
-			return err
-		}
-		tx = append(tx, types.TransactWriteItem{
-			Put: &types.Put{TableName: &s.Table, Item: av},
-		})
-	}
-	for _, k := range deletes {
-		tx = append(tx, types.TransactWriteItem{
-			Delete: &types.Delete{TableName: &s.Table, Key: KeyAV(k.PK, k.SK)},
-		})
-	}
-	_, err := s.DB.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: tx})
 	return err
 }
 

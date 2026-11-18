@@ -41,6 +41,7 @@ All optional; the defaults suit local development.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `DATABASE_URL` | — | **Required.** PostgreSQL connection URL, e.g. `postgres://pinpost:pinpost@localhost:5432/pinpost?sslmode=disable`. Migrations run on boot. |
 | `PINPOST_TABLE` | `pinpost` | DynamoDB table name |
 | `PINPOST_BUCKET` | `pinpost-attachments` | S3 bucket for attachments |
 | `AWS_ENDPOINT_URL` | *(real AWS)* | DynamoDB endpoint. Setting it means local development: the table is created on boot. |
@@ -51,7 +52,7 @@ All optional; the defaults suit local development.
 | `PINPOST_SEED_DEMO` | `0` | Set to `1` for the demo tenant above. Local development only. |
 | `PINPOST_GOOGLE_CLIENT_ID` | — | Google OAuth **web** client id. Empty disables Google sign-in and hides the button. |
 | `PINPOST_GOOGLE_ALLOWED_EMAILS` | — | Comma-separated Google addresses allowed to sign in. This is the access control: an allowed address gets an `admin` member record on first sign-in, anything else is rejected. Empty means nobody. |
-| `PINPOST_ADMIN_EMAIL` / `PINPOST_ADMIN_PASSWORD` | — | Provisions the first owner on an empty table. Ignored once seeding has run (a `#BOOTSTRAP` marker item records it; delete that item to allow a re-seed). With no `PINPOST_ADMIN_EMAIL`, the first allowlisted Google address is seeded as owner with no usable password. |
+| `PINPOST_ADMIN_EMAIL` / `PINPOST_ADMIN_PASSWORD` | — | Provisions the first owner on an empty database. Ignored once seeding has run (the one row in the `bootstrap` table records it; `DELETE FROM bootstrap` allows a re-seed). With no `PINPOST_ADMIN_EMAIL`, the first allowlisted Google address is seeded as owner with no usable password. |
 | `PINPOST_ORG_NAME` / `PINPOST_PROJECT_NAME` | `Acme` / `Acme App` | Names for that first tenant |
 | `PINPOST_WRITE_KEY` | generated | Write key for that first project; the generated one is logged once at startup |
 
@@ -122,8 +123,7 @@ Point the dev proxy elsewhere with `PINPOST_API_URL`. What it does today:
   submission" check. The write key is a public identifier, so `GET
   /v1/projects` returns it; owners/admins can rotate it with `POST
   /v1/projects/{id}/write-key/rotate`, which revokes the old key in the same
-  transaction (every SDK still holding it gets 401). Projects created before
-  the key was stored readable show no key until rotated once.
+  write (every SDK still holding it gets 401).
 
 The status dropdowns only offer transitions the server state machine accepts
 (`open ⇄ in_progress → resolved → reopen; spam → open`), so the UI does not

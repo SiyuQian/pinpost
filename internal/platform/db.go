@@ -2,12 +2,28 @@ package platform
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"io/fs"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+// Migrations is the schema, one append-only file per change.
+var Migrations, _ = fs.Sub(migrationFiles, "migrations")
+
+// DBTX is what both a pool and a transaction offer, for the few helpers that
+// run either inside a caller's transaction or on their own.
+type DBTX interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // OpenDB connects to PostgreSQL and checks the connection, so a bad
 // DATABASE_URL fails at boot rather than on the first request.

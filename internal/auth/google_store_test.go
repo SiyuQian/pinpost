@@ -2,55 +2,28 @@ package auth
 
 import (
 	"context"
-	"os"
-	"strings"
 	"testing"
 
-	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The member-creating half of Google sign-in only exists against a table, so
-// these run on DynamoDB Local and skip the same way the seed tests do.
-func newGoogleStore(t *testing.T) *platform.Store {
+// newGoogleDB returns a database with one organization recorded as the
+// bootstrapped one, which is where Google sign-in places new members.
+func newGoogleDB(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
-	if os.Getenv("AWS_ENDPOINT_URL") == "" {
-		os.Setenv("AWS_ENDPOINT_URL", "http://localhost:8000")
+	db := pgtest.New(t)
+	orgID := uuid.NewString()
+	for _, q := range []string{
+		`INSERT INTO organizations (id, name) VALUES ($1, 'Acme')`,
+		`INSERT INTO bootstrap (organization_id) VALUES ($1)`,
+	} {
+		if _, err := db.Exec(context.Background(), q, orgID); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-		os.Setenv("AWS_ACCESS_KEY_ID", "pinpost")
-		os.Setenv("AWS_SECRET_ACCESS_KEY", "pinpost-secret")
-	}
-	cfg, err := platform.AWSConfig(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "pinpost-google-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
-	store := platform.NewStore(cfg, name)
-	if err := platform.EnsureTable(context.Background(), store); err != nil {
-		pgtest.Unavailable(t, "dynamodb unreachable: %v", err)
-	}
-	t.Cleanup(func() {
-		store.DB.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: &name})
-	})
-	return store
-}
-
-// putMarker writes the bootstrap marker, with an org id only when one is given
-// — a marker without it is what a table seeded by an earlier build looks like.
-func putMarker(t *testing.T, store *platform.Store, orgID string) {
-	t.Helper()
-	item := platform.KeyAV(platform.BootstrapMarker, platform.Meta)
-	if orgID != "" {
-		item["org_id"] = platform.S(orgID)
-	}
-	if _, err := store.DB.PutItem(context.Background(), &dynamodb.PutItemInput{
-		TableName: &store.Table, Item: item,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	return db, orgID
 }
 
 const allowedEmail = "alice@example.com"
@@ -62,10 +35,8 @@ func googleOK(t *testing.T) GoogleConfig {
 
 func TestLoginWithGoogleProvisionsAllowlistedMember(t *testing.T) {
 	ctx := context.Background()
-	store := newGoogleStore(t)
-	orgID := uuid.NewString()
-	putMarker(t, store, orgID)
-	s := &Service{Store: store}
+	db, orgID := newGoogleDB(t)
+	s := &Service{DB: db}
 	cfg := googleOK(t)
 
 	_, first, err := s.LoginWithGoogle(ctx, cfg, "credential")
@@ -95,14 +66,12 @@ func TestLoginWithGoogleProvisionsAllowlistedMember(t *testing.T) {
 // must honour it instead of minting a fresh admin over the top.
 func TestLoginWithGoogleRejectsDeactivatedMember(t *testing.T) {
 	ctx := context.Background()
-	store := newGoogleStore(t)
-	orgID := uuid.NewString()
-	putMarker(t, store, orgID)
-	s := &Service{Store: store}
+	db, orgID := newGoogleDB(t)
+	s := &Service{DB: db}
 
 	item := NewMemberItem(orgID, uuid.NewString(), allowedEmail, "Alice", "viewer", "")
 	item.Status = "disabled"
-	if err := store.Put(ctx, item); err != nil {
+	if err := InsertMember(ctx, db, item); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.LoginWithGoogle(ctx, googleOK(t), "credential"); status(err) != 403 {
@@ -110,14 +79,11 @@ func TestLoginWithGoogleRejectsDeactivatedMember(t *testing.T) {
 	}
 }
 
-// A marker with no org id is a table seeded before the id was recorded there.
-// Signing in cannot guess an organization, so it must say so rather than
-// invent one — the backfill in project.Seed is what repairs it.
-func TestLoginWithGoogleWithoutMarkerOrg(t *testing.T) {
+// A database that was never seeded has no organization to join. Signing in
+// cannot guess one, so it must say so rather than invent one.
+func TestLoginWithGoogleBeforeSeeding(t *testing.T) {
 	ctx := context.Background()
-	store := newGoogleStore(t)
-	putMarker(t, store, "")
-	s := &Service{Store: store}
+	s := &Service{DB: pgtest.New(t)}
 	if _, _, err := s.LoginWithGoogle(ctx, googleOK(t), "credential"); status(err) != 503 {
 		t.Fatalf("got %v (status %d), want 503", err, status(err))
 	}
