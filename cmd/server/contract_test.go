@@ -252,9 +252,10 @@ func (c *contractClient) assertFullCoverage() {
 // green because no 403 was ever demanded. Authorization (403) and validation
 // (422) are the codes the handlers implement themselves and can silently lose,
 // so those are pinned. The rest are declared but not enforced here: 401 is the
-// shared session middleware (covered once by TestUnauthenticated), and 404/409/
-// 429/5xx depend on state or upstreams a single pass cannot reach for every
-// operation. Widen this as those become reachable.
+// shared session middleware (covered by the doNoCookies check in TestAPIContract
+// and the session tests in internal/auth), and 404/409/429/5xx depend on state
+// or upstreams a single pass cannot reach for every operation. Widen this as
+// those become reachable.
 func enforcedStatus(status int) bool { return status == 403 || status == 422 }
 
 // unreachableHere names the operation/status pairs enforcedStatus would demand
