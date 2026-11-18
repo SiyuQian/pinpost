@@ -43,7 +43,7 @@ func newServer(store *platform.Store, db *pgxpool.Pool, s3c *s3.Client, bucket s
 		Project:       proj,
 		Feedback:      &feedback.Service{DB: db, Attachment: att, Members: proj},
 		Attachment:    att,
-		Outbox:        &outbox.Service{Store: store},
+		Outbox:        &outbox.Service{DB: db},
 		IngestLimiter: platform.NewRateLimiter(store, ingestLimit()),
 		Google:        googleConfig(),
 	}
@@ -156,14 +156,17 @@ func seed(ctx context.Context, db *pgxpool.Pool) error {
 	})
 }
 
-// runBackground does what S3 events and table TTLs used to: it scans
-// attachments every couple of seconds and sweeps expired rows every ten
-// minutes, until ctx ends. Every replica runs it; ScanDue claims rows with
-// SKIP LOCKED, so they never work the same row twice.
+// runBackground sends due webhook deliveries and scans attachments every
+// couple of seconds, and sweeps expired rows every ten minutes, until ctx
+// ends. Every replica runs it; both workers claim rows with SKIP LOCKED, so
+// two replicas never work the same row.
+//
+// ponytail: polling, so a webhook leaves up to two seconds after its commit.
+// Add LISTEN/NOTIFY if that latency ever matters.
 func runBackground(ctx context.Context, srv *api.Server) {
-	scan := time.NewTicker(2 * time.Second)
+	poll := time.NewTicker(2 * time.Second)
 	sweep := time.NewTicker(10 * time.Minute)
-	defer scan.Stop()
+	defer poll.Stop()
 	defer sweep.Stop()
 	report := func(what string, err error) {
 		if err != nil && ctx.Err() == nil {
@@ -174,12 +177,15 @@ func runBackground(ctx context.Context, srv *api.Server) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-scan.C:
-			_, err := srv.Attachment.ScanDue(ctx)
+		case <-poll.C:
+			_, err := srv.Outbox.DispatchDue(ctx)
+			report("webhook dispatch", err)
+			_, err = srv.Attachment.ScanDue(ctx)
 			report("attachment scan", err)
 		case <-sweep.C:
 			report("session sweep", srv.Auth.SweepExpiredSessions(ctx))
 			report("attachment sweep", srv.Attachment.SweepUnclaimed(ctx))
+			report("delivery sweep", srv.Outbox.SweepDeliveries(ctx))
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SiyuQian/pinpost/internal/attachment"
+	"github.com/SiyuQian/pinpost/internal/outbox"
 	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -338,7 +339,16 @@ func (s *Service) Create(ctx context.Context, in *CreateInput) (*Created, error)
 				return errRollback
 			}
 		}
-		return nil
+		// source lets a consumer route a report the team filed itself away
+		// from customer traffic.
+		return outbox.Enqueue(ctx, tx, in.OrganizationID, "feedback.created.v1", map[string]any{
+			"feedback_id": out.FeedbackID,
+			"project_id":  in.ProjectID,
+			"type":        in.Type,
+			"message":     strings.TrimSpace(in.Message),
+			"source":      source,
+			"rating":      in.Rating,
+		})
 	})
 	if invalidAttachment != "" {
 		return nil, platform.ValidationErr(map[string]string{
@@ -589,6 +599,11 @@ type activity struct {
 	data map[string]any
 }
 
+type event struct {
+	typ  string
+	data map[string]any
+}
+
 // Update applies workflow changes, enforcing the state machine and recording
 // activity. The write is conditional on updated_at still holding the value
 // this call read: a concurrent edit commits first, this UPDATE then matches no
@@ -612,6 +627,7 @@ func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *Upd
 		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
 	}
 	var activities []activity
+	var events []event
 
 	if in.Status != nil && *in.Status != cur.Status {
 		if !validStatus[*in.Status] {
@@ -630,6 +646,8 @@ func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *Upd
 		}
 		set("status", *in.Status)
 		activities = append(activities, activity{"status_changed", map[string]any{"from": cur.Status, "to": *in.Status}})
+		events = append(events, event{"feedback.status_changed.v1", map[string]any{
+			"feedback_id": id, "from": cur.Status, "to": *in.Status, "actor_id": actorID}})
 	}
 	if in.Priority != nil && *in.Priority != cur.Priority {
 		if !validPriority[*in.Priority] {
@@ -653,6 +671,10 @@ func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *Upd
 			set("assignee_id", *in.AssigneeID)
 		}
 		activities = append(activities, activity{"assigned", map[string]any{"assignee_id": in.AssigneeID}})
+		if from := cur.AssigneeID; (from == nil) != (*in.AssigneeID == "") || (from != nil && *from != *in.AssigneeID) {
+			events = append(events, event{"feedback.assigned.v1", map[string]any{
+				"feedback_id": id, "assignee_id": *in.AssigneeID, "actor_id": actorID}})
+		}
 	}
 	if in.Tags != nil {
 		if len(in.Tags) > 20 {
@@ -679,6 +701,11 @@ func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *Upd
 				return err
 			}
 		}
+		for _, e := range events {
+			if err := outbox.Enqueue(ctx, tx, orgID, e.typ, e.data); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -697,7 +724,12 @@ func (s *Service) AddNote(ctx context.Context, orgID, id, actorID, note string) 
 		return err
 	}
 	return pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
-		return insertActivity(ctx, tx, id, "member", &actorID, "note_added", map[string]any{"note": note})
+		if err := insertActivity(ctx, tx, id, "member", &actorID, "note_added", map[string]any{"note": note}); err != nil {
+			return err
+		}
+		// The note itself stays internal; the event only says one was added.
+		return outbox.Enqueue(ctx, tx, orgID, "feedback.note_added.v1", map[string]any{
+			"feedback_id": id, "actor_id": actorID})
 	})
 }
 
