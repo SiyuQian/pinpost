@@ -38,10 +38,12 @@ Use a new idempotency key for each report. Reusing a key for the same project re
 
 Run `docker compose down` to stop the stack and keep its data volumes.
 
+For the demo tenant used by the SDK integration tests, follow [Development](#development).
+
 ## Integrate Pinpost
 
 - **HTTP API.** Use the [OpenAPI contract](api/openapi.yaml) to integrate from any language. The [quick start](#quick-start) includes a complete submission example.
-- **Client SDKs.** See [Pinpost SDK](https://github.com/SiyuQian/pinpost-sdk) for the React, React Native and headless TypeScript packages, setup guides and examples. Open **嵌入与集成** (Embed & Integrations) in the dashboard for snippets with your Pinpost URL and project write key.
+- **Client SDKs.** See [Pinpost SDK](https://github.com/SiyuQian/pinpost-sdk) for setup guides and examples for `@pinpost/core`, `@pinpost/react` and `@pinpost/react-native`. Open **嵌入与集成** (Embed & Integrations) in the dashboard for snippets with your Pinpost URL and project write key.
 
 ### Attachments
 
@@ -116,6 +118,6 @@ For tests and contribution steps, see [CONTRIBUTING.md](CONTRIBUTING.md). If you
 
 ## License
 
-Pinpost is © DE TECHNOLOGY LIMITED. The server and admin dashboard are licensed under [AGPL-3.0-only](LICENSE). The client SDKs are licensed under [MIT](https://github.com/SiyuQian/pinpost-sdk/blob/main/LICENSE) and can be embedded in closed-source apps.
+Pinpost is © DE TECHNOLOGY LIMITED. This repository is licensed under [AGPL-3.0-only](LICENSE). The client SDKs are licensed under [MIT](https://github.com/SiyuQian/pinpost-sdk/blob/main/LICENSE) and can be embedded in closed-source apps.
 
 Contributions require a [Contributor License Agreement](CLA.md). Report vulnerabilities privately using the instructions in [SECURITY.md](SECURITY.md).
