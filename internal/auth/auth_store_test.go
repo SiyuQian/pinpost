@@ -100,15 +100,24 @@ func TestMemberFromRequestRejectsDeadSessions(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		kill func(token, memberID string)
+		kill func(t *testing.T, token, memberID string)
 	}{
-		{"expired", func(token, _ string) {
+		{"expired", func(_ *testing.T, token, _ string) {
 			f.exec(`UPDATE sessions SET expires_at = now() - interval '1 minute' WHERE token_hash = $1`, sha256hex(token))
 		}},
-		{"disabled member", func(_, memberID string) {
+		{"disabled member", func(_ *testing.T, _, memberID string) {
 			f.exec(`UPDATE members SET status = 'disabled' WHERE id = $1`, memberID)
 		}},
-		{"logged out", func(token, _ string) { f.s.Logout(ctx, token) }},
+		{"logged out", func(t *testing.T, token, _ string) {
+			f.s.Logout(ctx, token)
+			var n int
+			if err := f.db.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE token_hash = $1`, sha256hex(token)).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n != 0 {
+				t.Fatalf("session rows after logout = %d, want 0", n)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// A member per case keeps disabling one from affecting the others.
@@ -122,7 +131,7 @@ func TestMemberFromRequestRejectsDeadSessions(t *testing.T) {
 			if err != nil || m.ID != id {
 				t.Fatalf("live session: member %v err %v, want %s", m, err, id)
 			}
-			tc.kill(token, id)
+			tc.kill(t, token, id)
 			_, err = f.s.MemberFromRequest(cookieReq(token))
 			assertAPIError(t, err, 401, "unauthenticated")
 		})
