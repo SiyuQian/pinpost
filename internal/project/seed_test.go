@@ -8,6 +8,7 @@ import (
 
 	"github.com/SiyuQian/pinpost/internal/auth"
 	"github.com/SiyuQian/pinpost/internal/platform"
+	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/smithy-go/middleware"
 	"github.com/google/uuid"
@@ -30,7 +31,7 @@ func newSeedStore(t *testing.T) *platform.Store {
 	name := "pinpost-seed-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
 	store := platform.NewStore(cfg, name)
 	if err := platform.EnsureTable(context.Background(), store); err != nil {
-		t.Skipf("dynamodb unreachable: %v", err)
+		pgtest.Unavailable(t, "dynamodb unreachable: %v", err)
 	}
 	t.Cleanup(func() {
 		store.DB.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: &name})

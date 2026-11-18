@@ -11,7 +11,7 @@ malware scanning with quarantine.
 ## Quick start
 
 ```bash
-docker compose up -d --wait          # DynamoDB Local (:8000) + RustFS (:9000)
+docker compose up -d --wait          # Postgres (:5432), DynamoDB Local (:8000), RustFS (:9000)
 npm --prefix web/admin ci            # admin console dependencies (first run only)
 npm --prefix web/admin run build     # build the admin console into web/admin/dist
 source ./local.env                   # point the AWS SDK at those two containers

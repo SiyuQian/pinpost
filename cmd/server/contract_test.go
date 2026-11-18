@@ -22,6 +22,7 @@ import (
 
 	"github.com/SiyuQian/pinpost/internal/api"
 	"github.com/SiyuQian/pinpost/internal/platform"
+	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
 	"github.com/SiyuQian/pinpost/internal/project"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -70,7 +71,7 @@ func newContractClient(t *testing.T) *contractClient {
 	}
 	store := platform.NewStore(cfg, env("PINPOST_TABLE", "pinpost-test"))
 	if err := platform.EnsureTable(ctx, store); err != nil {
-		t.Skipf("dynamodb unreachable, skipping contract test: %v", err)
+		pgtest.Unavailable(t, "dynamodb unreachable, skipping contract test: %v", err)
 	}
 	if err := project.SeedDemo(ctx, store); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -85,7 +86,7 @@ func newContractClient(t *testing.T) *contractClient {
 		var owned *s3types.BucketAlreadyOwnedByYou
 		var exists *s3types.BucketAlreadyExists
 		if !errors.As(err, &owned) && !errors.As(err, &exists) {
-			t.Skipf("object storage unreachable, skipping contract test: %v", err)
+			pgtest.Unavailable(t, "object storage unreachable, skipping contract test: %v", err)
 		}
 	}
 
