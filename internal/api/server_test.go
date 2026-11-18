@@ -4,41 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/SiyuQian/pinpost/internal/auth"
-	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
 	"github.com/SiyuQian/pinpost/internal/project"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/google/uuid"
 )
-
-func newStore(t *testing.T) *platform.Store {
-	t.Helper()
-	if os.Getenv("AWS_ENDPOINT_URL") == "" {
-		os.Setenv("AWS_ENDPOINT_URL", "http://localhost:8000")
-	}
-	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-		os.Setenv("AWS_ACCESS_KEY_ID", "pinpost")
-		os.Setenv("AWS_SECRET_ACCESS_KEY", "pinpost-secret")
-	}
-	cfg, err := platform.AWSConfig(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := "pinpost-api-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
-	store := platform.NewStore(cfg, name)
-	if err := platform.EnsureTable(context.Background(), store); err != nil {
-		pgtest.Unavailable(t, "dynamodb unreachable: %v", err)
-	}
-	t.Cleanup(func() {
-		store.DB.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: &name})
-	})
-	return store
-}
 
 // TestLoginSetsCookieOnlyOnSuccess pins the contract for Login: the response
 // body is built before SetSessionCookie, so nothing that can fail runs after
@@ -51,14 +23,11 @@ func newStore(t *testing.T) *platform.Store {
 // checks against Google's own endpoint, and there is no seam to stub. If that
 // seam ever appears, this is the case to copy.
 func TestLoginSetsCookieOnlyOnSuccess(t *testing.T) {
-	store := newStore(t)
-
-	hash, err := auth.HashPassword("hunter2-long-enough")
-	if err != nil {
-		t.Fatal(err)
-	}
-	member := auth.NewMemberItem("org-1", "mem-1", "ada@example.com", "Ada", "owner", hash)
-	if err := store.Put(context.Background(), member); err != nil {
+	db := pgtest.New(t)
+	if _, err := project.Provision(context.Background(), db, project.Params{
+		OrgName: "Ada Org", ProjectName: "Default", Environment: "development",
+		Email: "ada@example.com", Password: "hunter2-long-enough",
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -73,16 +42,12 @@ func TestLoginSetsCookieOnlyOnSuccess(t *testing.T) {
 	}
 
 	t.Run("a failed organization read sets no cookie", func(t *testing.T) {
-		cfg, err := platform.AWSConfig(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		// A store pointed at a table that does not exist: authentication
-		// succeeds, then session() fails reading the organization.
-		broken := platform.NewStore(cfg, "pinpost-missing-"+strings.ReplaceAll(uuid.NewString(), "-", "")[:12])
+		// A pool on an empty schema, where the organizations table does not
+		// exist: authentication succeeds, then session() fails reading the
+		// organization.
 		w := login(&Server{
-			Auth:    &auth.Service{Store: store},
-			Project: &project.Service{Store: broken},
+			Auth:    &auth.Service{DB: db},
+			Project: &project.Service{DB: pgtest.Schema(t)},
 		})
 
 		if w.Code == 200 {
@@ -95,8 +60,8 @@ func TestLoginSetsCookieOnlyOnSuccess(t *testing.T) {
 
 	t.Run("success sets the cookie and answers the shared session shape", func(t *testing.T) {
 		w := login(&Server{
-			Auth:    &auth.Service{Store: store},
-			Project: &project.Service{Store: store},
+			Auth:    &auth.Service{DB: db},
+			Project: &project.Service{DB: db},
 		})
 
 		if w.Code != 200 {

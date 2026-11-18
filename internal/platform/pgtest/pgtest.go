@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -62,5 +63,15 @@ func Schema(t testing.TB) *pgxpool.Pool {
 		admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
 		admin.Close(ctx)
 	})
+	return pool
+}
+
+// New returns a pool on a fresh schema with every migration applied.
+func New(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	pool := Schema(t)
+	if err := platform.Migrate(context.Background(), pool, platform.Migrations); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
 	return pool
 }

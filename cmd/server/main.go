@@ -20,6 +20,7 @@ import (
 	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/SiyuQian/pinpost/internal/project"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func env(key, fallback string) string {
@@ -31,11 +32,11 @@ func env(key, fallback string) string {
 
 // newServer wires the domain slices behind the generated spec router.
 // Shared with the contract test, which also reaches into the slices directly.
-func newServer(store *platform.Store, s3c *s3.Client, bucket string) *api.Server {
+func newServer(store *platform.Store, db *pgxpool.Pool, s3c *s3.Client, bucket string) *api.Server {
 	att := &attachment.Service{Store: store, S3: s3c, Presign: s3.NewPresignClient(s3c), Bucket: bucket}
-	proj := &project.Service{Store: store}
+	proj := &project.Service{DB: db}
 	return &api.Server{
-		Auth:          &auth.Service{Store: store},
+		Auth:          &auth.Service{DB: db},
 		Project:       proj,
 		Feedback:      &feedback.Service{Store: store, Attachment: att, Members: proj},
 		Attachment:    att,
@@ -122,12 +123,12 @@ func spaHandler(dir string) http.Handler {
 	})
 }
 
-// seed provisions the first tenant on an empty table. The demo tenant ships
+// seed provisions the first tenant on an empty database. The demo tenant ships
 // with credentials published in the README, so a deployment must opt into it;
 // otherwise the owner comes from the environment.
-func seed(ctx context.Context, store *platform.Store) error {
+func seed(ctx context.Context, db *pgxpool.Pool) error {
 	if env("PINPOST_SEED_DEMO", "0") == "1" {
-		return project.SeedDemo(ctx, store)
+		return project.SeedDemo(ctx, db)
 	}
 	email, password := env("PINPOST_ADMIN_EMAIL", ""), env("PINPOST_ADMIN_PASSWORD", "")
 	switch c := googleConfig(); {
@@ -145,7 +146,7 @@ func seed(ctx context.Context, store *platform.Store) error {
 		slog.Info("no seed configured; set PINPOST_GOOGLE_CLIENT_ID and PINPOST_GOOGLE_ALLOWED_EMAILS for Google sign-in, PINPOST_ADMIN_EMAIL and PINPOST_ADMIN_PASSWORD for a password owner, or PINPOST_SEED_DEMO=1 for the demo tenant")
 		return nil
 	}
-	return project.Seed(ctx, store, project.Params{
+	return project.Seed(ctx, db, project.Params{
 		OrgName: env("PINPOST_ORG_NAME", "Acme"), ProjectName: env("PINPOST_PROJECT_NAME", "Acme App"),
 		Environment: "production", Email: email, Password: password,
 		WriteKey: env("PINPOST_WRITE_KEY", ""),
@@ -171,7 +172,16 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if err := seed(ctx, store); err != nil {
+	db, err := platform.OpenDB(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		slog.Error("database connection failed; set DATABASE_URL", "error", err)
+		os.Exit(1)
+	}
+	if err := platform.Migrate(ctx, db, platform.Migrations); err != nil {
+		slog.Error("database migration failed", "error", err)
+		os.Exit(1)
+	}
+	if err := seed(ctx, db); err != nil {
 		slog.Error("seed failed", "error", err)
 		os.Exit(1)
 	}
@@ -183,7 +193,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	mux := newMux(newServer(store, s3c, bucket))
+	mux := newMux(newServer(store, db, s3c, bucket))
 
 	// The browser SDK posts from customer origins; the admin console does not.
 	origins := strings.Split(env("CORS_ALLOWED_ORIGINS", ""), ",")
