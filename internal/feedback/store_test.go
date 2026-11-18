@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/SiyuQian/pinpost/internal/attachment"
+	"github.com/SiyuQian/pinpost/internal/outbox"
 	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -158,5 +160,75 @@ func TestListPagesNewestFirstAndMatchesLiterally(t *testing.T) {
 	}
 	if page, _, _ := svc.List(ctx, ListFilter{OrganizationID: uuid.NewString()}); len(page) != 0 {
 		t.Fatalf("another organization listed %d rows", len(page))
+	}
+}
+
+// Each write enqueues its webhook event in the same transaction; this pins
+// the mapping that derive() used to own.
+func TestWritesEnqueueTheirEvents(t *testing.T) {
+	svc, db, orgID, projectID := newService(t)
+	ctx := context.Background()
+	if _, err := (&outbox.Service{DB: db}).CreateEndpoint(ctx, orgID, "https://example.com/hook", nil); err != nil {
+		t.Fatal(err)
+	}
+	memberID := uuid.NewString()
+	if _, err := db.Exec(ctx, `INSERT INTO members (id, organization_id, email, name, role)
+		VALUES ($1, $2, 'agent@example.com', 'Agent', 'agent')`, memberID, orgID); err != nil {
+		t.Fatal(err)
+	}
+	events := func() map[string]map[string]any {
+		t.Helper()
+		rows, _ := db.Query(ctx, `SELECT event_type, payload FROM webhook_deliveries ORDER BY created_at, id`)
+		out := map[string]map[string]any{}
+		var typ string
+		var payload map[string]any
+		if _, err := pgx.ForEachRow(rows, []any{&typ, &payload}, func() error {
+			out[typ] = payload
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	in := input(orgID, projectID, uuid.NewString())
+	in.Source, in.ActorID = SourceInternal, memberID
+	out, err := svc.Create(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := events()["feedback.created.v1"]
+	if created["feedback_id"] != out.FeedbackID || created["source"] != "internal" || created["message"] != "it broke" {
+		t.Fatalf("created payload = %v", created)
+	}
+
+	status, assignee := "in_progress", memberID
+	if _, err := svc.Update(ctx, orgID, out.FeedbackID, memberID,
+		&UpdateInput{Status: &status, AssigneeID: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+	got := events()
+	if p := got["feedback.status_changed.v1"]; p["from"] != "open" || p["to"] != "in_progress" || p["actor_id"] != memberID {
+		t.Fatalf("status_changed payload = %v", p)
+	}
+	if p := got["feedback.assigned.v1"]; p["assignee_id"] != memberID {
+		t.Fatalf("assigned payload = %v", p)
+	}
+
+	// Re-assigning the same member is not a change and emits nothing.
+	if _, err := svc.Update(ctx, orgID, out.FeedbackID, memberID, &UpdateInput{AssigneeID: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddNote(ctx, orgID, out.FeedbackID, memberID, "internal detail"); err != nil {
+		t.Fatal(err)
+	}
+	got = events()
+	if p := got["feedback.note_added.v1"]; p["actor_id"] != memberID || p["note"] != nil {
+		t.Fatalf("note_added payload = %v, want the actor and not the note text", p)
+	}
+	var n int
+	db.QueryRow(ctx, `SELECT count(*) FROM webhook_deliveries`).Scan(&n)
+	if n != 4 {
+		t.Fatalf("deliveries = %d, want 4 (created, status_changed, assigned, note_added)", n)
 	}
 }

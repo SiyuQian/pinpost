@@ -141,12 +141,13 @@ With the server running, the core test suite also executes a live end-to-end che
 
 ## Webhooks
 
-Feedback events (`feedback.created.v1`, `feedback.status_changed.v1`, `feedback.assigned.v1`, `feedback.note_added.v1`) are derived from the table's change stream by `cmd/webhook` and delivered to registered endpoints. Owners/admins manage endpoints via `POST/GET/PATCH/DELETE /v1/webhook-endpoints`.
+Feedback events (`feedback.created.v1`, `feedback.status_changed.v1`, `feedback.assigned.v1`, `feedback.note_added.v1`) are delivered to registered endpoints. Owners/admins manage endpoints via `POST/GET/PATCH/DELETE /v1/webhook-endpoints`.
 
 - Requests are signed: `X-Pinpost-Signature: v1=hex(HMAC-SHA256(secret, "<X-Pinpost-Timestamp>.<body>"))`; the secret is returned once at creation.
-- Retries on 5xx/408/429/network errors are the Lambda event source's job (6 attempts — the initial delivery plus 5 retries — over at most an hour, then the SQS dead-letter queue, which nothing drains yet). Only the record that failed is retried, not its whole batch. Delivery is at-least-once, so consumers must be idempotent (dedupe on `X-Pinpost-Event-Id`). An endpoint down for longer than that hour loses those events; the Postgres-era ladder that retried for 24h is gone.
-- 10 consecutive failures auto-pause an endpoint; `PATCH {"status":"active"}` resumes it, and `POST /v1/webhook-deliveries/{id}/replay` re-sends a finished delivery without changing the event ID.
-- Nothing is emitted explicitly: `internal/outbox/stream.go` maps item changes to events, and `TestDerive` pins that mapping.
+- Each event is written to the database in the same transaction as the change it reports, one pending delivery per subscribed endpoint, and the server's background worker sends it within a couple of seconds. Delivery is at-least-once, so consumers must be idempotent (dedupe on `X-Pinpost-Event-Id`, which retries and replays keep).
+- 5xx/408/429/network errors are retried after 1m, 5m, 30m, 2h, 6h and 12h — seven attempts over about 20 hours — then the delivery is marked `failed`. Other 4xx responses fail at once. A pending delivery shows its `next_attempt_at`.
+- 10 consecutive failures auto-pause an endpoint; deliveries for it queue while it is paused and go out once `PATCH {"status":"active"}` resumes it. Events that happen while it is paused are not queued. `POST /v1/webhook-deliveries/{id}/replay` re-sends a finished delivery without changing the event ID.
+- Delivery history is kept for 30 days.
 
 ## API contract
 
