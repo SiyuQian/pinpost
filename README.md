@@ -1,12 +1,12 @@
 # Pinpost
 
-An embeddable cross-platform feedback system. See the design doc at [docs/feedback-system-design.md](docs/feedback-system-design.md) — note that its persistence, attachment and webhook-delivery chapters describe the original PostgreSQL design and are superseded by this README; see the banner at the top of that file.
+An embeddable cross-platform feedback system. See the design doc at [docs/feedback-system-design.md](docs/feedback-system-design.md); where it and the code disagree, the code wins.
 
-This repository implements **Phase 1** end to end on a serverless stack: a Go
-modular monolith running on Lambda behind CloudFront, a **DynamoDB single
-table**, **S3 direct-upload attachments**, an admin dashboard, client SDKs
+This repository implements **Phase 1** end to end as one self-hostable
+container: a Go modular monolith on **PostgreSQL**, **direct-upload
+attachments** on any S3-compatible store, an admin dashboard, client SDKs
 (`@pinpost/core`, `@pinpost/react`, `@pinpost/react-native`) and attachment
-malware scanning with quarantine.
+malware scanning with quarantine. `docker compose up` runs all of it.
 
 ## Quick start
 
@@ -65,15 +65,15 @@ and data access; `cmd/server` only wires slices together.
 
 ```
 api/                 # openapi.yaml (source of truth) + codegen config
-cmd/server/          # API entry point: store, seed, wiring, static files
+cmd/server/          # the one binary: migrations, seed, wiring, static files, background workers
 internal/
   api/               # generated router/models (gen.go) + ServerInterface impl delegating to slices
   auth/              # member sessions, roles, write keys
   project/           # project/member queries, demo seed
   feedback/          # creation, idempotency, cursor list, state machine, activities
   attachment/        # presigned S3 uploads, post-upload verification, scanning
-  outbox/            # webhook endpoints, stream-derived events, delivery
-  platform/          # shared kernel: single-table store, error envelope, rate limiter
+  outbox/            # webhook endpoints, transactional outbox, delivery worker
+  platform/          # shared kernel: Postgres pool + migrations/, S3 client, error envelope, rate limiter
 web/admin/           # admin console: Vite + React + TypeScript + Tailwind + shadcn/ui
 web/demo/            # embedded feedback widget example (inline mini SDK)
 sdk/                 # TypeScript SDK monorepo (npm workspaces)
@@ -182,37 +182,35 @@ Tenant isolation is structural rather than a `WHERE` clause everyone must rememb
 
 ## Data model
 
-One table, one sparse index, no scans anywhere.
+PostgreSQL, defined by the append-only migrations in
+[internal/platform/migrations/](internal/platform/migrations/), applied on boot.
 
-| Entity | PK | SK |
-|---|---|---|
-| Organization | `ORG#<orgId>` | `#META` |
-| Project | `ORG#<orgId>` | `PROJ#<projId>` |
-| Write key | `WK#<sha256>` | `#META` |
-| Member | `ORG#<orgId>` | `MEM#<memberId>` |
-| Session | `SESS#<tokenHash>` | `#META` |
-| Feedback | `ORG#<orgId>` | `FB#<uuidv7>` |
-| Activity | `FB#<feedbackId>` | `ACT#<uuidv7>` |
-| Attachment | `ATT#<attId>` | `#META` |
-| Idempotency key | `IDEM#<projId>#<key>` | `#META` |
-| Rate-limit counter | `RL#<project\|ip>#<minute>` | `#META` |
-| Webhook endpoint | `ORG#<orgId>` | `WH#<id>` |
-| Delivery | `DLV#<id>` | `#META` |
+| Table | Holds |
+|---|---|
+| `organizations`, `bootstrap` | tenants; the one-row marker that seeding has run |
+| `projects` | write key (unique, a public identifier), SDK settings |
+| `members`, `sessions` | dashboard accounts; sessions keyed by the token's SHA-256 |
+| `feedback`, `activities` | reports (unique per project + idempotency key) and their timelines |
+| `attachments` | upload metadata, claim, scan status and scan queue |
+| `webhook_endpoints`, `webhook_deliveries` | subscriptions; pending deliveries are the outbox |
 
-`GSI1` is sparse and covers three lookups: members by email (`EMAIL#<email>`),
-attachments by feedback (`FB#<feedbackId>`) and deliveries by endpoint
-(`WH#<endpointId>`). Sort keys are UUIDv7, whose lexical order is time order,
-so "newest first with a cursor" is a reverse Query and the cursor is a sort
-key. `expires_at` is the TTL attribute: sessions, idempotency keys, rate-limit
-counters, unclaimed attachments and delivery records all expire on their own,
-so no cleanup job — and no cleanup scan — exists.
+Every organization-scoped query filters on the organization from the
+caller's session or write key. Composite foreign keys make cross-organization
+references impossible to write: feedback's project and assignee must belong to
+its organization, and an attachment can only be linked to feedback of its own
+project. Reads have no such backstop, which is what the cross-tenant tests in
+`cmd/server/authz_test.go` are for.
 
-Two reads are deliberate read-amplification rather than an index: filtering by
-status/type/assignee uses a `FilterExpression`, and `q` search plus the
-analytics overview aggregate a single organization's partition in memory (the
-overview is cached 60 seconds per instance). Cost is bounded by one tenant's
-data, not by the table. Above roughly 50k feedback items in one organization,
-add the sparse `GSI2PK = ORG#<org>#STATUS#<s>` index.
+IDs are UUIDv7, so "newest first with a cursor" is `ORDER BY id DESC` and the
+cursor is an id. Inbox filters and `q` search (`ILIKE`, with `%`/`_` matched
+literally) run inside one organization's rows on the `(organization_id, id)`
+index, and the overview is two `GROUP BY` queries. Above roughly 50k feedback
+items in one organization, add composite indexes such as
+`(organization_id, status, id)`, then `pg_trgm` for search.
+
+Nothing expires by TTL: every ten minutes the server deletes expired sessions,
+attachment rows unclaimed after 24 hours and delivery records older than 30
+days. Idempotency keys live with their feedback and never expire.
 
 ## Boundaries
 

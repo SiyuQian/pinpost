@@ -1,8 +1,8 @@
 # Pinpost 跨平台反馈系统设计
 
-> 状态：Phase 1 已实现，本文于 2026-08 与代码对齐  
+> 状态：Phase 1 已实现，本文于 2026-11 与代码对齐（持久化已从 DynamoDB 迁到 PostgreSQL）  
 > 目标平台：iOS、Android、Web；优先提供 React Native / React SDK  
-> 后端：Go on AWS Lambda + DynamoDB 单表 + S3  
+> 后端：单个 Go 进程 + PostgreSQL + S3 兼容对象存储，`docker compose up` 自部署  
 > 本文边界：定义产品、架构、接口、数据、安全、运维与交付方案，不包含业务实现代码。
 > 实现细节、本地启动方式和当前已知边界见 [README](../README.md)；两者冲突时以代码为准
 
@@ -17,8 +17,8 @@ Pinpost 是一个可嵌入客户产品的反馈系统。最终用户无需离开
 3. 可靠接收文本、评分、上下文、截图和附件，弱网环境下不轻易丢失。
 4. 从第一天支持多租户，确保不同客户的数据严格隔离。
 5. 反馈字段、主题和触发方式可配置，但 MVP 不演变成通用表单平台。
-6. 后端保持简单，且没有流量时接近零成本：一个 Go 模块化单体跑在 Lambda 上，一张
-   DynamoDB 表，没有常驻实例、VPC、NAT 或负载均衡器。
+6. 后端保持简单，并且能自部署：一个 Go 模块化单体容器、一个 PostgreSQL、一个
+   S3 兼容对象存储，`docker compose up` 即可运行，不依赖任何云厂商的专有服务。
 7. 默认保护隐私；截图、日志和用户身份必须由客户显式配置。
 
 ### 1.2 非目标
@@ -99,11 +99,11 @@ Pinpost 是一个可嵌入客户产品的反馈系统。最终用户无需离开
 2. SDK 拉取已发布的轻量配置并本地缓存。
 3. 用户通过浮动按钮、菜单或业务代码打开反馈面板。
 4. SDK 根据配置收集允许的上下文；用户填写内容并检查附件。
-5. 如果有附件，SDK 申请预签名 URL 并直传对象存储；对象落桶后由 `ScanFunction`
-   异步校验真实类型并扫描，在此之前附件是 `pending`。
+5. 如果有附件，SDK 申请预签名 URL 并直传对象存储；提交认领附件后，服务端的后台
+   worker 在几秒内校验真实类型并扫描，在此之前附件是 `pending`。
 6. SDK 调用 `POST /v1/feedback`，携带文本、上下文、幂等键和已上传 attachment IDs。
-7. 服务端用一次 `TransactWriteItems` 同时写入反馈项与幂等键项（幂等键带
-   `attribute_not_exists(pk)` 条件），立即返回反馈 ID。
+7. 服务端在一个事务里写入反馈、首条活动、附件认领和 webhook 事件；幂等由
+   `UNIQUE (project_id, idempotency_key)` 保证，重复提交直接返回已有反馈。
 8. 当前会话失败时 SDK 使用同一个幂等键重试；跨重启离线队列按真实需求后置。
 
 ### 4.2 团队处理
@@ -118,7 +118,7 @@ Pinpost 是一个可嵌入客户产品的反馈系统。最终用户无需离开
 ### 4.3 数据删除
 
 1. 客户按 `external_user_id` 或 feedback ID 发起查询。
-2. 系统验证操作者权限，删除或匿名化该组织分区下的业务记录，并删除对象存储附件。
+2. 系统验证操作者权限，删除或匿名化该组织下的业务记录，并删除对象存储附件。
 3. 不在日志中留下原始敏感数据。
 4. 只有数据规模导致请求无法在合理时间完成时，才升级为异步 `privacy_jobs`。
 
@@ -132,57 +132,53 @@ flowchart LR
     ADMIN[Admin SPA]
   end
 
-  CDN[CloudFront]
-  API["ApiFunction<br/>Go + Lambda Web Adapter"]
-  SITE[("S3 站点桶<br/>admin / demo")]
-  DDB[("DynamoDB 单表<br/>+ Streams + TTL")]
-  OBJ[(S3 附件桶)]
-  SCAN[ScanFunction]
-  HOOK[WebhookFunction]
-  DLQ[(SQS 死信队列)]
+  PROXY[HTTPS 反向代理]
+  subgraph APP["pinpost 容器（cmd/server）"]
+    API["HTTP API<br/>+ 管理后台 / demo 静态页"]
+    WORK["后台循环<br/>webhook 投递 · 附件扫描 · 过期清理"]
+  end
+  PG[("PostgreSQL")]
+  OBJ[("S3 兼容对象存储")]
   EXT[客户 Webhook 端点]
 
-  RN --> CDN
-  WEB --> CDN
-  ADMIN --> CDN
-  CDN -->|/v1/*| API
-  CDN -->|其余路径| SITE
-  API --> DDB
+  RN --> PROXY
+  WEB --> PROXY
+  ADMIN --> PROXY
+  PROXY --> API
+  API --> PG
   API -. 预签名 URL .-> RN
   API -. 预签名 URL .-> WEB
   RN -->|直传| OBJ
   WEB -->|直传| OBJ
-  OBJ -->|ObjectCreated| SCAN
-  SCAN --> DDB
-  DDB -->|Streams| HOOK
-  HOOK -->|签名 POST| EXT
-  HOOK -->|投递耗尽| DLQ
+  WORK --> PG
+  WORK -->|读回并扫描| OBJ
+  WORK -->|签名 POST| EXT
 ```
 
 ### 5.1 架构选择
 
-整套系统是一个 Go 模块化单体加两个由事件驱动的小函数，全部按量计费：
+整套系统是一个 Go 模块化单体进程，加 PostgreSQL 和一个 S3 兼容对象存储：
 
-- 一个 Go 代码库，三个入口：`cmd/server`（API）、`cmd/scan`（附件扫描）、
-  `cmd/webhook`（webhook 投递）。
-- `cmd/server` 是一个普通的 HTTP server。AWS Lambda Web Adapter 层把 Lambda
-  调用翻译成对 `:8080` 的 HTTP 请求，所以代码里没有一行 Lambda 专用逻辑，本地
-  开发既不需要 `sam local` 也不需要 Lambda 模拟器。
-- 一张 DynamoDB 表是业务事实来源，幂等提交由条件写实现（§7.6）。
-- 没有附件时，客户端一次请求完成提交；有附件时先取预签名 URL 直传 S3，再在提交
-  反馈时引用 attachment ID。
-- 不存在 Redis、独立消息队列、搜索引擎或常驻 Worker。异步副作用（附件扫描、
-  webhook 投递）由 S3 事件通知和 DynamoDB Streams 触发，没有轮询循环。
-- CloudFront 是唯一入口：`/v1/*` 回源到 API 的 Function URL，其余路径回源到
-  站点桶里的管理后台与 demo 静态文件，因此浏览器侧同源，无需 CORS。
+- 一个 Go 代码库，一个入口 `cmd/server`。同一进程既提供 HTTP API 和静态页面
+  （管理后台、demo），也运行后台循环：每 2 秒投递到期的 webhook、扫描已认领的
+  附件，每 10 分钟清理过期 session、未认领附件和 30 天前的投递记录。
+- PostgreSQL 是业务事实来源。迁移文件嵌入在二进制里，启动时按顺序执行，advisory
+  lock 保证多副本同时启动也只执行一次。
+- 没有附件时，客户端一次请求完成提交；有附件时先取预签名 URL 直传对象存储，再在
+  提交反馈时引用 attachment ID。
+- 不存在 Redis、独立消息队列或搜索引擎。异步副作用靠「事务内写入、后台轮询」：
+  webhook 事件与业务写入在同一个事务落库（§11），附件在被认领时排进扫描队列；
+  worker 用 `FOR UPDATE SKIP LOCKED` 认领，所以多副本不需要选主。
+- 部署形态是一个容器：`docker compose up` 启动 pinpost、PostgreSQL 与 RustFS；
+  生产环境在前面放一个 HTTPS 反向代理（README 的 Self-hosting 一节）。
 
-选择这套形态而不是容器 + 托管 PostgreSQL 的理由是成本曲线：没有流量时账单接近
-零，没有 NAT gateway、负载均衡器或最小实例数这类固定支出，而 Phase 1 的目标是
-让三个平台可靠提交、团队在后台处理，并不需要关系型数据库的连接与联表能力。
+选择这套形态的理由是自部署：同类产品用 `docker compose up` 加 Postgres 就能跑起来，
+而 Lambda + DynamoDB 要求每个自部署者都有 AWS 账号，DynamoDB Local 也不能用于生产。
+早期的无服务器实现（Lambda、DynamoDB 单表与 Streams、Terraform）保留在 git tag
+`aws-lambda-dynamodb`。
 
-代价写在明处：跨实体事务只有 `TransactWriteItems` 那一层，没有联表，没有
-`ILIKE` 之外的搜索，冷启动会让偶发请求慢几百毫秒。这些取舍在 §8 和 §17 有对应
-的重新评估触发条件。
+代价写在明处：进程常驻，没有「无流量零成本」；后台工作靠轮询，webhook 最多晚约
+2 秒发出；限流按进程计数。这些取舍在 §12 和 §17 有对应的重新评估触发条件。
 
 ## 6. 客户端 SDK 设计
 
@@ -323,22 +319,20 @@ editing -> uploading -> submitting -> succeeded
 
 ```text
 cmd/
-  server/          # API 入口：store 初始化、seed、路由装配、静态文件
-  scan/            # Lambda：对象落桶后校验真实类型并扫描
-  webhook/         # Lambda：消费表的变更流并投递 webhook
+  server/          # 唯一入口：迁移、seed、路由装配、静态文件、后台循环
 internal/
   api/             # 由 openapi.yaml 生成的路由与模型 + ServerInterface 实现
   auth/            # Member Session、固定角色、SDK Write Key
   project/         # Organization、Project、Member
   feedback/        # 创建、查询、状态、指派、活动记录
   attachment/      # 上传授权、元数据、扫描状态
-  outbox/          # webhook 端点、由变更流派生的事件、投递
-  platform/        # 共享内核：单表 store、错误信封、限流、CORS
+  outbox/          # webhook 端点、事务内写入的事件、投递 worker
+  platform/        # 共享内核：数据库连接与迁移、对象存储客户端、错误信封、限流、CORS
 ```
 
 每个功能包自己拥有 HTTP handler、业务规则和数据访问；`cmd/server` 只负责把切片
-装配起来。三个入口共用同一个 `internal/`，所以扫描函数和投递函数复用的是同一套
-item 定义，不存在第二份 schema。
+装配起来。后台循环和 HTTP handler 在同一进程，用的是同一套表结构和查询，不存在
+第二份 schema。
 
 同一进程内直接调用模块，不建立内部事件总线、repository interface 或只有一个实现
 的抽象层。需要替换的外部边界，例如对象存储和身份提供商，可以有小型 adapter。
@@ -426,7 +420,7 @@ key、项目由 body 显式指定并校验归属、以及记录落库时带上 `
 它——它是来源事实，不是可编辑的标签，所以没有做成 tag。只读角色（viewer）会被
 `requireWrite` 挡在写入之前。
 
-路由与参数解析由 oapi-codegen 从 `api/openapi.yaml` 生成，handler 实现生成的 `ServerInterface`，所以规格里写了却没实现的操作会编译失败。授权在 handler，业务规则在对应领域 package，DynamoDB 表达式留在该领域的数据访问文件里。不为每类实体创建形式化 repository interface。
+路由与参数解析由 oapi-codegen 从 `api/openapi.yaml` 生成，handler 实现生成的 `ServerInterface`，所以规格里写了却没实现的操作会编译失败。授权在 handler，业务规则在对应领域 package，SQL 留在该领域自己的数据访问代码里（手写 SQL 加 pgx，不用 ORM）。不为每类实体创建形式化 repository interface。
 
 ### 7.5 反馈状态机
 
@@ -445,100 +439,103 @@ open -> in_progress -> resolved
 
 ### 7.6 并发控制
 
-- 创建反馈用一次 `TransactWriteItems` 写入反馈项和幂等键项 `IDEM#<projId>#<key>`，
-  后者带 `attribute_not_exists(pk)` 条件；重复请求条件失败，读回已有反馈返回。
-  幂等键项带 TTL，过期后自然消失，没有清理任务。
-- 后台更新用 `ConditionExpression: updated_at = :expected` 做乐观并发控制，
-  不匹配时返回 `409 conflict`，由前端重新加载后确认。这取代了关系库里的行锁。
-- 状态变更和活动记录在同一次事务写入，避免出现改了状态却没有时间线的记录。
+- 创建反馈在一个事务里写入反馈、首条活动、附件认领和 webhook 事件。幂等由
+  `UNIQUE (project_id, idempotency_key)` 加 `INSERT ... ON CONFLICT DO NOTHING`
+  实现：重复请求什么也不写，读回已有反馈返回；并发的同 key 请求在唯一索引上等前
+  一个提交，然后走同一条路径。去重是永久的，没有过期，也没有清理任务。
+- 后台更新用 `UPDATE ... WHERE updated_at = $token` 做乐观并发控制，影响 0 行时
+  返回 `409 conflict`，由前端重新加载后确认。`updated_at` 一律由数据库 `now()`
+  写入、从库里读回，所以客户端回传的令牌和库里的值精确相等。
+- 状态变更、活动记录和 webhook 事件在同一个事务写入，不会出现改了状态却没有时间线
+  或事件的记录。
 
 ## 8. 数据模型
 
-一张 DynamoDB 表，一个稀疏索引，任何代码路径上都没有 Scan。租户隔离是结构性的，
-不是每个人都要记得写的 `WHERE`：所有组织级实体都放在分区键 `ORG#<orgId>` 下，
-跨租户读取根本无法表达，越界读一律返回 404。分区键始终来自认证上下文，绝不由
-客户端决定。
+PostgreSQL。表结构由 `internal/platform/migrations/` 下的迁移文件定义，文件只追加，
+已发布的文件不再修改（§14.2）。
 
-### 8.1 item 布局
+### 8.1 表
 
-| 实体 | PK | SK |
+| 表 | 主键 | 要点 |
 |---|---|---|
-| Organization | `ORG#<orgId>` | `#META` |
-| Project | `ORG#<orgId>` | `PROJ#<projId>` |
-| Write key | `WK#<sha256>` | `#META` |
-| Member | `ORG#<orgId>` | `MEM#<memberId>` |
-| Session | `SESS#<tokenHash>` | `#META` |
-| Feedback | `ORG#<orgId>` | `FB#<uuidv7>` |
-| Activity | `FB#<feedbackId>` | `ACT#<uuidv7>` |
-| Attachment | `ATT#<attId>` | `#META` |
-| Idempotency key | `IDEM#<projId>#<key>` | `#META` |
-| Rate-limit counter | `RL#<project\|ip>#<minute>` | `#META` |
-| Webhook endpoint | `ORG#<orgId>` | `WH#<id>` |
-| Delivery | `DLV#<id>` | `#META` |
+| `organizations` | `id` | |
+| `bootstrap` | `singleton` | 至多一行：部署已 seed，以及 Google 首次登录加入哪个组织 |
+| `projects` | `id` | `write_key` 唯一（公开标识，明文存储，§9.1）；`settings` 为 jsonb |
+| `members` | `id` | `UNIQUE (organization_id, email)`；按 `email` 建索引供登录 |
+| `sessions` | `token_hash` | 只存 token 的摘要；带 `expires_at` |
+| `feedback` | `id` | `UNIQUE (project_id, idempotency_key)`；`context` 为 jsonb，`tags` 为 text[] |
+| `activities` | `id` | 反馈时间线，按 `id` 排序 |
+| `attachments` | `id` | `feedback_id` 在认领前为空；`next_scan_at` 是扫描队列 |
+| `webhook_endpoints` | `id` | |
+| `webhook_deliveries` | `id` | `pending` 的行就是 outbox（§11）；`UNIQUE (endpoint_id, event_id)` |
 
-`#META` 是「一个分区只有一个 item」的实体所用的排序键。反馈正文、上下文、tags
-和 contact 都内嵌在反馈项里；附件只存元数据，二进制在 S3。
+反馈正文、上下文、tags 和 contact 都在 `feedback` 行里；附件只存元数据，二进制在
+对象存储。
 
-反馈项上的 `source` 记录这条反馈是谁提的：`widget` 是公开 ingestion 收到的用户
-反馈，`internal` 是成员在后台自己建的。这个字段是后加的，早于它写入的行没有该
-属性，读取端一律按 `widget` 兜底——列表投影、Webhook payload 和 `source=widget`
-的筛选（用 `attribute_not_exists(source) OR source = :source`）都必须照顾这一
-点，否则历史数据会整批从默认视图里消失。
+ID 是 UUIDv7，在 Go 里生成，字节序就是时间序，所以「按时间倒序 + 游标」就是
+`ORDER BY id DESC` 加 `id < $cursor`；游标是编码后的 id，不存在深 offset。
 
-排序键使用 UUIDv7，其字典序即时间序，所以「按时间倒序 + 游标」就是一次逆向
-Query，游标本身就是排序键，不需要额外的时间索引，也不存在深 offset。
+`feedback.source` 记录这条反馈是谁提的：`widget` 是公开 ingestion 收到的用户反馈，
+`internal` 是成员在后台自己建的。列是 `NOT NULL DEFAULT 'widget'`。
 
-### 8.2 GSI1 与 TTL
+### 8.2 多租户隔离
 
-`GSI1`（`gsi1pk` / `gsi1sk`）是稀疏索引，只覆盖三种反向查找：
+- 读：每条组织级查询都带 `organization_id = $n`，值只来自认证上下文（session 或
+  write key），绝不由客户端决定；越界读一律返回 404。不按组织过滤的查询只有几类，
+  都发生在确立租户之前或与租户无关：write key 认证、session 查找、登录时按邮箱查
+  成员、后台 worker 认领、过期清理和 seed。
+- 写：复合外键让跨组织的引用在数据库里写不进去——`feedback` 的
+  `(organization_id, project_id)` 和 `(organization_id, assignee_id)`，以及
+  `attachments` 的 `(project_id, feedback_id) → feedback (project_id, id)`（附件只能
+  挂到同一项目的反馈上，不管是哪段代码在写）。
+- 不使用 RLS：它要求每个请求都包事务并 `SET LOCAL`，上面那几类合法的跨租户查询
+  都得绕过策略，自部署者还要配置多个数据库角色。读路径的护栏是跨租户负向测试
+  （§15.2）；企业客户要求库层隔离时再评估。
 
-| 用途 | `gsi1pk` |
+### 8.3 索引与过期
+
+| 用途 | 索引 |
 |---|---|
-| 按邮箱查成员（登录） | `EMAIL#<email>` |
-| 按反馈查附件 | `FB#<feedbackId>` |
-| 按端点查投递记录 | `WH#<endpointId>` |
+| Inbox 列表与筛选 | `feedback (organization_id, id)` |
+| 登录按邮箱查成员 | `members (email)` |
+| 反馈的附件 | `attachments (feedback_id)` |
+| 扫描队列 | `attachments (next_scan_at) WHERE scan_status = 'pending' AND feedback_id IS NOT NULL` |
+| 投递历史 | `webhook_deliveries (endpoint_id, created_at DESC)` |
+| 投递队列 | `webhook_deliveries (next_attempt_at) WHERE status = 'pending'` |
 
-没有这三种需求的 item 不写 `gsi1pk`，因此不进索引，也不产生额外写入费用。
+没有 TTL：后台循环每 10 分钟删除过期 session、超过 24 小时仍未认领的附件行和 30 天
+前的投递记录，读取 session 时本身也过滤过期行。幂等键随反馈永久保存，不需要清理。
 
-`expires_at` 是 TTL 属性。session、幂等键、限流计数器、未认领的附件项和投递记录
-都自己过期，所以系统里没有清理任务，也就没有清理用的 Scan。本地开发不开启 TTL，
-生产在 [infrastructure/terraform/modules/pinpost/dynamodb.tf](../infrastructure/terraform/modules/pinpost/dynamodb.tf) 里声明。
+### 8.4 刻意的读放大
 
-### 8.3 刻意的读放大
+- 按 status / type / source / assignee 筛选和 `q` 搜索（`ILIKE`，`%` 和 `_` 按字面
+  匹配）都在 `(organization_id, id)` 索引的范围内过滤。
+- Overview 是两条 `GROUP BY`，不缓存。
 
-两处查询用读放大换掉了索引：
+代价的上界是单个租户的数据量，而不是整个库，所以对早期规模是划算的。单个组织的
+反馈量超过约 5 万条、或筛选延迟不达标时，加 `(organization_id, status, id)` 这类
+复合索引；`q` 搜索延迟不达标时先加 `pg_trgm` 索引，再评估独立搜索。
 
-- 按 status / type / assignee 筛选使用 `FilterExpression`，在读回后过滤。
-- `q` 搜索和 analytics overview 把单个组织的分区读进内存聚合，overview 按实例
-  缓存 60 秒。
-
-代价的上界是单个租户的数据量，而不是整张表，所以对早期规模是划算的。当单个组织
-的反馈量超过约 5 万条时，增加稀疏索引 `GSI2PK = ORG#<org>#STATUS#<s>`；搜索延迟
-不达标时再评估 OpenSearch。
-
-### 8.4 演进触发条件
+### 8.5 演进触发条件
 
 | 变更 | 只在何时做 |
 |---|---|
-| `GSI2`（按状态） | 单组织反馈量超过约 5 万条，或筛选延迟不达标 |
-| 独立搜索服务 | 分区内存聚合的 `q` 搜索延迟不达标 |
-| End user / Installation item | 需要用户画像、跨反馈历史、设备级频控或推送 |
-| SDK config 版本 item | 客户需要配置审批、回滚和发布历史 |
-| 独立 tag item | 标签需要颜色、治理、权限或跨反馈统计 |
-| 组织级 audit item | 企业客户要求不可变审计 |
-| 异步隐私任务 item | 数据规模大到导出或删除不能在一次请求内完成 |
+| 复合筛选索引 | 单组织反馈量超过约 5 万条，或筛选延迟不达标 |
+| `pg_trgm` / 独立搜索服务 | `q` 搜索延迟不达标 |
+| End user / Installation 表 | 需要用户画像、跨反馈历史、设备级频控或推送 |
+| SDK config 版本表 | 客户需要配置审批、回滚和发布历史 |
+| 独立 tag 表 | 标签需要颜色、治理、权限或跨反馈统计 |
+| 组织级 audit 表 | 企业客户要求不可变审计 |
+| 异步隐私任务表 | 数据规模大到导出或删除不能在一次请求内完成 |
 
-这些都不是提前创建的占位符。单表的好处正是加新实体只是加一种键前缀，不需要
-migration；回填由一次性脚本完成。
+这些都不是提前创建的占位符；需要时加一个迁移文件。
 
-### 8.5 数据完整性
+### 8.6 数据完整性
 
-DynamoDB 没有外键和 CHECK 约束，因此这些不变量由代码和测试维持，不由存储引擎维持：
-
-- 关联实体必须与其分区键上的 `organization_id` 一致；关键写路径用
-  `TransactWriteItems` 一次写完，避免出现半截状态。
-- 状态、评分范围、附件大小与类型在 handler 层校验，并由契约测试覆盖。
-- 跨租户负向测试是这里唯一真正的护栏（§15.2），因为不存在可以退守的行级安全。
+- 外键、唯一约束和 CHECK（类型、状态、优先级、评分 1–5、来源、角色、扫描状态）由
+  数据库强制；状态机的转换规则、附件大小与类型在 handler 层校验，并由契约测试覆盖。
+- 关键写路径（创建反馈、更新状态、seed 首个租户）在一个事务里完成，不会留下半截
+  状态。
 - 业务删除优先使用明确状态；个人数据删除必须真的删除或不可逆匿名化，不能只
   soft delete。
 
@@ -546,7 +543,7 @@ DynamoDB 没有外键和 CHECK 约束，因此这些不变量由代码和测试�
 
 ### 9.1 SDK 请求
 
-- Write Key 是公开标识，不是秘密，不能用它查询反馈或管理项目。因此明文与摘要一起存储，后台「嵌入与集成」可随时查看；所有者/管理员可轮换，旧 key 在同一事务里失效（无宽限期）。
+- Write Key 是公开标识，不是秘密，不能用它查询反馈或管理项目。因此明文存储（`projects.write_key` 唯一，认证就是一次索引查找），后台「嵌入与集成」可随时查看；所有者/管理员可轮换，轮换是一条 UPDATE，新 key 生效的同时旧 key 失效（无宽限期）。
 - 对 Write Key 设置环境状态、Origin/App Identifier allowlist、速率和配额。
 - Web 校验 `Origin` 只能降低滥用，不能作为强认证；原生 App Bundle ID 也可被伪造。
 - 未登录用户分配随机 installation ID，不使用硬件指纹。
@@ -558,18 +555,16 @@ DynamoDB 没有外键和 CHECK 约束，因此这些不变量由代码和测试�
 当前实现是自持的密码会话，而不是外部 OIDC：托管身份服务在这个规模上是一笔固定
 月费，而后台用户是客户团队成员，不是终端用户。
 
-- 密码用 bcrypt 存储。登录时按邮箱查 `GSI1`，未命中也照样对一个固定 hash 跑一次
+- 密码用 bcrypt 存储。登录时按邮箱查 `members`，未命中也照样对一个固定 hash 跑一次
   bcrypt，否则响应时间就是一个账号枚举接口。
-- Session 是一个 `SESS#<tokenHash>` item，带 TTL，服务端过期即失效；Cookie 为
-  HttpOnly、`SameSite=Lax`、`Path=/`。
-- `Secure` 标志按请求判定：Lambda Web Adapter 把 HTTPS 调用降级成到 `:8080` 的
-  明文 HTTP，所以 `r.TLS` 在部署里永远是 nil，判据是 Function URL 设置的
-  `X-Forwarded-Proto`；本地 http 开发没有这个头，于是不加标志。清除 Cookie 时
+- Session 是 `sessions` 表的一行，只存 token 的 SHA-256 摘要；读取时过滤过期行，
+  后台定期清理。Cookie 为 HttpOnly、`SameSite=Lax`、`Path=/`。
+- `Secure` 标志按请求判定：TLS 由部署前面的反向代理终止，转发到本服务的是明文
+  HTTP，所以 `r.TLS` 为 nil，判据是代理设置的 `X-Forwarded-Proto`；本地 http 开发没有这个头，于是不加标志。清除 Cookie 时
   必须重复同一组属性，否则浏览器会把原来那个留着。
 - 没有独立的 CSRF token，防护来自 `SameSite=Lax` 加上写操作均非简单请求。引入
   跨站嵌入的后台组件之前需要重新评估。
-- 服务端对每个资源执行组织作用域 + capability 检查（§8 的分区键让前者变成结构
-  性的），不依赖前端隐藏按钮。
+- 服务端对每个资源执行组织作用域 + capability 检查（§8.2），不依赖前端隐藏按钮。
 - 企业阶段再增加 OIDC/SAML SSO、SCIM 和可配置 Session 策略；届时上面这套换成
   adapter，而不是并存两套密码系统。
 
@@ -577,7 +572,8 @@ DynamoDB 没有外键和 CHECK 约束，因此这些不变量由代码和测试�
 
 - 云工作负载身份访问对象存储和密钥管理，不保存长期云密钥。
 - 管理员 impersonation 默认关闭；若启用，必须审批、限时、明确横幅并完整审计。
-- 每个函数一个 IAM 角色，权限按需最小化；扫描与投递函数不共用 API 函数的角色。
+- 对象存储密钥只授予附件桶的读写；数据库账号只需要应用库的权限（启动时迁移需要
+  DDL 权限，需要最小权限账号时再拆出单独的迁移命令）。
 
 ## 10. 安全与隐私
 
@@ -597,7 +593,8 @@ DynamoDB 没有外键和 CHECK 约束，因此这些不变量由代码和测试�
 ### 10.2 加密与密钥
 
 - 全部公网传输使用 TLS。
-- 表与对象存储启用静态加密（DynamoDB 默认开启，桶使用 SSE-S3 或 KMS）。
+- 数据库与对象存储启用静态加密（托管 PostgreSQL 通常默认开启，自部署由磁盘或卷
+  加密提供；桶使用 SSE-S3、KMS 或对象存储自带的加密）。
 - 邮箱等敏感字段使用 KMS envelope encryption；Webhook 上线后对其 Secret 使用相同策略。
 - 搜索用邮箱保存规范化后的 keyed hash；展示值使用加密原文。
 - Secret 有版本号和轮换流程，严禁写入 Git、日志或错误追踪 payload。
@@ -608,7 +605,8 @@ DynamoDB 没有外键和 CHECK 约束，因此这些不变量由代码和测试�
 - 上传 URL 短期有效，只允许指定 object key、大小区间与 content type。
 - 上传完成后校验 checksum；未扫描附件不能向后台成员提供内联预览。
 - 下载使用短期签名 URL 或鉴权代理，并设置 `Content-Disposition`、`X-Content-Type-Options: nosniff` 和严格 CSP。
-- 未关联的临时上传对象通过对象存储生命周期策略清理。
+- 未关联的临时上传：元数据行 24 小时后由后台清理；对象本身还留在桶里，需要时在
+  同一次清理中删除对象，或配置对象存储的生命周期策略。
 
 ### 10.4 保留与合规
 
@@ -623,19 +621,19 @@ DynamoDB 没有外键和 CHECK 约束，因此这些不变量由代码和测试�
 
 Webhook 已经实现；Email 通知仍是后续能力。这一章描述当前的投递机制。
 
-### 11.1 事件来自变更流，而不是 Outbox 表
+### 11.1 事件在业务事务里写入（transactional outbox）
 
-没有任何代码显式发出事件。`internal/outbox/stream.go` 的 `derive()` 读取
-DynamoDB Streams 的记录，把 item 变化映射成事件；`TestDerive` 钉住这个映射。
+业务写路径（创建反馈、更新状态与指派、添加备注）在自己的事务里调用
+`outbox.Enqueue`，为每个订阅了该事件、且处于 active 状态的端点插入一行 `pending`
+的 `webhook_deliveries`。
 
-- 业务写入和事件产生天然在一个原子操作里，因为事件就是那次写入本身，这正是
-  Outbox 模式要解决的问题，而这里不需要第二张表和一个轮询 Worker。
-- 分片消费保证每条记录只交给一个调用，取代了 `FOR UPDATE SKIP LOCKED` 的租约。
-- 事件 ID 由流记录 ID 派生，因此 Lambda 重试重发的是同一个事件 ID，按
-  `X-Pinpost-Event-Id` 去重的消费者只会看到一次。投递语义仍是至少一次。
-- 事件源在 Lambda 侧按 `sk` 前缀过滤（`FB#` 与 `ACT#`），因为表里还有限流计数
-  器、session、幂等键和投递记录本身；`derive()` 也会丢弃它们，但那是在这次调用
-  已经计费之后。
+- 事件当且仅当它描述的变更提交时存在，回滚的写入不留下事件——这正是 Outbox 模式
+  要解决的问题，而 outbox 就是投递表本身，不需要第二张表。
+- 事件 ID 在写入时生成并保存在行上，重试和手动重放都沿用它，按
+  `X-Pinpost-Event-Id` 去重的消费者只会看到一次。投递语义是至少一次。
+- `TestWritesEnqueueTheirEvents` 钉住「哪种写入产生哪种事件、payload 含什么」的
+  映射；重复指派同一个人不算变化，不产生事件。
+- 端点处于暂停状态时，新发生的事件不会为它入队。
 
 事件命名：
 
@@ -655,16 +653,20 @@ DynamoDB Streams 的记录，把 item 变化映射成事件；`TestDerive` 钉�
   secret 只在创建时返回一次。
 - 签名：`X-Pinpost-Signature: v1=hex(HMAC-SHA256(secret, "<timestamp>.<body>"))`，
   Header 另含 event ID、delivery ID 和 timestamp。
-- 重试是事件源的职责，不再是 Worker 里的退避表：5xx/408/429/网络错误共 6 次投递
-  （首次加 5 次重试），最长约 1 小时，之后进入 SQS 死信队列。
-- 失败按记录上报（`ReportBatchItemFailures`），只重试失败的那一条。否则一个坏
-  订阅者会让整批记录重投，把流量放大到所有健康端点上。
-- **已知边界**：宕机超过一小时的端点会丢失那段时间的事件，关系库时代 24 小时的
-  退避阶梯没有等价物；死信队列目前无人消费。需要恢复那种保证时，增加一个消费
-  死信队列的重放函数。
-- 连续 10 次失败自动暂停端点，`PATCH {"status":"active"}` 恢复；
-  `POST /v1/webhook-deliveries/{id}/replay` 重发一次已完成的投递且不改变事件 ID。
-- 投递记录保存状态、延迟和截断后的 body，带 TTL 自动过期，不存潜在 secret。
+- 后台循环每 2 秒调用一次 `DispatchDue`：用 `FOR UPDATE SKIP LOCKED` 认领最多 10
+  条到期投递，把 `next_attempt_at` 推后 2 分钟作为租约并提交，然后在事务外并发发送，
+  最后记录结果。慢订阅者不会占住数据库连接；发送后、记录前崩溃的投递在租约结束后
+  重发；多副本不会认领同一行。
+- 5xx/408/429/网络错误按 1 分钟、5 分钟、30 分钟、2 小时、6 小时、12 小时重试，共
+  7 次、约 20 小时，之后标为 `failed`；其他 4xx 立即失败。待重试的投递在 API 里带
+  `next_attempt_at`。
+- 每条投递单独记录结果，一个坏订阅者只影响它自己的投递，健康端点不会被重发。
+- 连续 10 次失败自动暂停端点。暂停前已入队的投递会保留，`PATCH {"status":"active"}`
+  恢复后继续发送；`POST /v1/webhook-deliveries/{id}/replay` 内联重发一次已完成的
+  投递且不改变事件 ID。
+- 投递记录保存状态、延迟和截断后的 body，30 天后由后台清理，不存潜在 secret。
+- 轮询意味着事件最多晚约 2 秒发出。需要更低延迟时，在事务里加 `pg_notify`，让
+  worker `LISTEN`。
 
 ### 11.3 通知
 
@@ -681,7 +683,7 @@ Email 通知尚未实现。上线时遵循：
 - 20% 反馈带附件，平均附件 1.5 MiB。
 - 文本与元数据平均 8 KiB。
 - 约 30 GiB/天新增附件，远高于表里的文本数据，因此附件生命周期和成本是首要容量变量；
-  DynamoDB 的按需写入费用与 CloudWatch 日志摄入是另外两个。
+  数据库存储与日志量是另外两个。
 
 这些数字不是产品承诺。上线前需用真实客户数量、DAU、入口曝光率、提交率和附件率重新计算。
 
@@ -694,7 +696,7 @@ Email 通知尚未实现。上线时遵循：
 | SDK 配置 API p95 | 小于 200 ms，可 CDN 缓存 |
 | Dashboard 主要列表 p95 | 小于 1 s |
 | 反馈入库到后台可见 | 99% 小于 5 s |
-| 已确认提交的数据持久性 | 依赖 DynamoDB 三副本与 S3，目标至少 99.999999% 级别设计 |
+| 已确认提交的数据持久性 | 取决于 PostgreSQL 的部署与备份：托管多可用区数据库加 S3 可做到 99.999999% 级别设计；自部署单机取决于部署方的备份 |
 
 客户端“提交成功”只在写入事务提交后返回。附件是例外，见 §10.3 与 README 的
 Boundaries：附件在扫描完成前即可关联到反馈，因为 SDK 可能在上传后几毫秒就提交，
@@ -702,46 +704,45 @@ Boundaries：附件在扫描完成前即可关联到反馈，因为 SDK 可能�
 
 ### 12.3 超时与隔离
 
-- API 函数设置 30 秒超时、256 MiB 内存；HTTP server 自身仍设置
-  read/header/body/write/idle timeout。
-- 并发隔离由 Lambda 提供：慢请求占用的是自己的执行环境，不是共享连接池，因此
-  没有“连接池耗尽”这类故障模式，取而代之的是账户并发上限和冷启动。
-- 外部调用只发生在 `cmd/webhook` 里，不会拉长用户提交路径。
-- 按 project + IP 的分钟级限流计数器（`RL#` item，带 TTL）实施公平限流。
-- 优雅停机不再是应用职责：Lambda 在执行环境回收前不会中断进行中的调用。
+- HTTP server 设置 read/header/write/idle timeout。并发由 Go 运行时和数据库连接池
+  （pgxpool 默认大小）承载，连接池耗尽表现为请求排队。
+- 后台工作不占用请求路径：扫描每批最多 5 个对象（内存上限约 50 MiB），投递在
+  事务外发送，单次请求 10 秒超时。
+- 外部调用（webhook）只在后台循环里发生，不会拉长用户提交路径。
+- 按 project + IP 的分钟级限流计数在进程内存里；多副本时各自计数，有效上限是 N 倍。
+  需要全局一致时把计数移到 PostgreSQL。
+- 优雅停机：收到 SIGTERM 后先停后台循环，再在 20 秒内处理完进行中的请求。
 
 ### 12.4 备份与灾备
 
-- DynamoDB 开启 PITR（35 天）与按需备份，恢复粒度是整表恢复到新表，因此恢复演练
-  必须包含切换表名这一步。
+- 自部署：定期 `pg_dump`（或文件系统级备份加 WAL 归档），并和附件桶一起备份——
+  反馈行按 object key 引用附件。托管 PostgreSQL 使用其自动备份与 PITR。
 - 每季度执行一次恢复演练，记录 RTO/RPO，而不只是假设备份可用。
-- 初始目标 RPO ≤ 5 分钟（PITR 的实际粒度）、RTO ≤ 4 小时；企业需求再提升。
+- 初始目标：RPO 取决于备份方式（托管 PITR 约 5 分钟），RTO ≤ 4 小时；企业需求再提升。
 - 附件桶启用版本控制与生命周期策略；删除恢复能力与合规删除之间要有明确窗口。
-- 跨区域灾备（全局表）在单区域运行稳定后再引入，避免早期复杂度与双倍写入费用。
+- 跨区域灾备（只读副本或托管的跨区域复制）在单区域运行稳定后再引入。
 
 ## 13. 可观测性
 
 ### 13.1 统一信号
 
-- Logs：`log/slog` 输出结构化 JSON 到 CloudWatch，包含 request ID、route、
-  status、latency 和租户的不可逆内部标识；不含请求正文。
-  **日志保留期是这套架构里最贵的一个旋钮**，模板里固定为 7 天，摄入费用会超过
-  计算费用，延长前先算账。
-- Metrics：Lambda 自带调用数、错误数、Duration、并发数和 Throttles；DynamoDB
-  自带 `ConsumedCapacity`、`ThrottledRequests`、`SystemErrors`；流消费侧自带
-  `IteratorAge`。这些都不需要埋点。
-- Traces：需要时开启 X-Ray；对高流量成功请求采样，对错误提高采样率。
-- Audit：反馈处理动作由 Activity item 记录；组织级审计在企业需求出现后再单列。
+- Logs：`log/slog` 输出结构化 JSON 到 stdout，由容器平台收集，包含 request ID、
+  route、status、latency 和租户的不可逆内部标识；不含请求正文。保留期按平台计费决定。
+- Metrics：目前没有导出指标。需要时先直接观察两个队列：`webhook_deliveries` 里
+  `status = 'pending' AND next_attempt_at < now()` 的行数（投递积压），以及
+  `attachments` 里待扫描的行数。下一步是加 Prometheus `/metrics`。
+- Traces：需要时接入 OpenTelemetry；对高流量成功请求采样，对错误提高采样率。
+- Audit：反馈处理动作由 `activities` 表记录；组织级审计在企业需求出现后再单列。
 
 ### 13.2 核心告警
 
 - Ingestion 5xx 或延迟超过 SLO 窗口。
-- Lambda Throttles 非零，或 DynamoDB `ThrottledRequests` 持续非零。
-- 流消费的 `IteratorAge` 持续升高——这是 webhook 投递积压的先行指标。
-- 死信队列深度非零：目前无人消费，所以任何非零值都意味着事件已经丢了。
-- 附件上传或对象存储错误率突升；扫描函数错误率非零。
+- `/healthz` 返回 503、数据库连接失败或连接池持续等待。
+- 到期未发的 pending 投递持续增加——这是 webhook 投递积压的先行指标。
+- 标为 `failed` 的投递突增，或端点被自动暂停。
+- 附件上传或对象存储错误率突升；扫描失败日志非零。
 - 单租户提交速率、拒绝率或附件流量异常。
-- 月度成本异常（尤其是 CloudWatch 摄入量与 S3 存储量）。
+- 数据库与对象存储容量增长异常。
 
 告警必须指向 Runbook，明确检查项、止损操作和升级联系人。
 
@@ -749,54 +750,34 @@ Boundaries：附件在扫描完成前即可关联到反馈，因为 SDK 可能�
 
 ### 14.1 环境
 
-- Local：`docker compose up` 启动 DynamoDB Local 与 RustFS，`go run ./cmd/server`
-  直接跑同一个二进制。表和桶在启动时按需创建，没有迁移步骤，也不需要
-  Lambda 模拟器。
-- CI：同样两个容器，跑单元测试、契约测试（kin-openapi 校验每个规格操作）和
-  跨租户越权测试。
-- Staging / Production：`infrastructure/terraform/` 下每个环境一个 root
-  （从 `example/` 复制一份），共用 `modules/pinpost`，各自一份 state。资源本身
-  不会漂移，只有命名和配置不同；state 分开才是真正的边界——在 staging 里
-  plan 或 apply 碰不到生产。没有需要预置的固定资源，所以两个环境的成本差异
-  只来自流量。
-
-[infrastructure/terraform/](../infrastructure/terraform/) 声明了全部基础设施：表（含 TTL 与变更流）、
-两个桶、三个函数及其 IAM 角色、死信队列、CloudFront 分发和 7 天日志保留。两件事对账单是决定性的：保留期保持短，以及
-永远不要把 API 函数放进 VPC——一个 NAT gateway 的月费高于这套 stack 的其余全部。
-DynamoDB 保持按需计费，在这个规模上预置容量更贵。
-
-```bash
-./infrastructure/build.sh                      # 编译三个 Go 二进制成 Lambda zip，两个环境共用
-terraform -chdir=infrastructure/terraform/example init
-terraform -chdir=infrastructure/terraform/example apply
-aws s3 sync web/admin/dist "s3://$(terraform -chdir=infrastructure/terraform/example output -raw site_bucket)/admin/"
-aws s3 sync web/demo       "s3://$(terraform -chdir=infrastructure/terraform/example output -raw site_bucket)/demo/"
-```
-
-每个环境复制一份 `example/`，在各自目录里执行同样的命令。
+- Local：`docker compose up -d --wait postgres s3` 启动 PostgreSQL 与 RustFS，
+  `go run ./cmd/server` 直接跑同一个二进制；迁移在启动时执行，桶缺失时自动创建。
+- CI：同样两个容器，跑单元测试、契约测试（kin-openapi 校验每个规格操作）和跨租户
+  越权测试；设置了 `CI` 时，集成测试连不上依赖会失败而不是跳过。`compose-smoke`
+  任务构建镜像、启动完整的三件套、登录并提交一条反馈。
+- 自部署 / Staging / Production：同一个镜像（`Dockerfile`），配 PostgreSQL 15+ 和
+  任意 S3 兼容存储；`docker-compose.yml` 就是参考部署。前面放 HTTPS 反向代理，不
+  直接暴露 8787。在 AWS 上用 ECS / App Runner / Lightsail 加 RDS 与 S3 运行同一个
+  镜像。
 
 ### 14.2 发布
 
-- 函数由 `infrastructure/build.sh` 构建并带 commit SHA 部署；Terraform plan 就是审计与回滚单位。
-- **没有数据库迁移。** 单表的 schema 变化是加一种键前缀或加一个属性，因此发布
-  顺序是普通的向前兼容问题：先写新属性、再读新属性、最后清理旧属性。回填由一次
-  性脚本完成，不进部署流水线。
+- 镜像带 commit SHA 构建；回滚就是换回上一个镜像，前提是迁移前向兼容（见下一条）。
+- 数据库迁移嵌入在二进制里，启动时按文件名顺序在一个事务里应用，advisory lock 保证
+  多副本只执行一次。迁移文件只追加，不修改已发布的文件。滚动发布时新旧版本会短暂
+  并存，所以 schema 变化必须前向兼容：先加列或表，再让代码使用，在之后的版本里再
+  删除旧列。
 - API 保持前后兼容，使旧 SDK 在移动端较长升级周期内仍可工作；CI 用 `oasdiff`
   阻断破坏性规格变更。
-- 静态资源（管理后台、demo）同步到站点桶后需要按路径失效 CloudFront 缓存。
 - SDK 使用语义化版本；破坏性变更只在 major release，并附迁移指南。
 
-### 14.3 配置和基础设施
+### 14.3 配置
 
-- 基础设施即代码只有 `infrastructure/terraform/` 一处：`modules/pinpost/` 按资源
-  类型分文件（`dynamodb.tf`、`s3.tf`、`lambda.tf`、`iam.tf`、`cloudfront.tf`），
-  表、桶、IAM、日志组和事件源全在里面；环境 root 只声明 backend、provider 和
-  一个 module 调用。
-- 非敏感配置通过函数环境变量注入；敏感值（种子管理员密码等）作为 `sensitive`
-  变量传入，或来自 Secret Manager。
-- 每个环境独立 AWS 账号是理想边界，至少保证 stack、表、桶和 IAM 角色隔离。
-- IAM 按函数最小权限：扫描函数只有 `s3:GetObject`，投递函数只有表和索引的读写
-  加死信队列的发送权限。
+- 配置全部通过环境变量注入（README 的 Configuration 一节）：`DATABASE_URL` 必填，
+  其余可选。
+- 敏感值（数据库密码、对象存储密钥、种子管理员密码）来自部署平台的 secret 机制，
+  不写进镜像或仓库。
+- 应用只需要一个数据库账号和一把只能读写附件桶的对象存储密钥。
 
 ## 15. 测试策略
 
@@ -812,20 +793,23 @@ aws s3 sync web/demo       "s3://$(terraform -chdir=infrastructure/terraform/exa
 ### 15.2 Backend
 
 - 领域单元测试：状态机、权限、配额、保留策略、`derive()` 的流记录到事件映射。
-- 集成测试跑在 DynamoDB Local 与 RustFS 上：条件写、事务、并发冲突和索引查询都用
-  真实引擎验证，不用 mock。
+- 集成测试跑在 PostgreSQL 与 RustFS 上：唯一约束、外键、事务、并发冲突（并发幂等、
+  `SKIP LOCKED` 认领）都用真实引擎验证，不用 mock。每个测试一个独立 schema
+  （`pgtest.New`），互不干扰；设置了 `CI` 时，依赖不可用会让测试失败而不是跳过。
 - 契约测试对着 `api/openapi.yaml` 逐个操作跑，用 kin-openapi 校验请求与响应，
   任何未被覆盖的规格操作直接判失败。
 - 多租户负向测试：组织 A 的每个角色均不能读取/修改组织 B 的数据和附件。
-  存储层没有行级安全可退守，所以这组测试是唯一的护栏，不可跳过。
+  读路径没有行级安全可退守（写路径有复合外键），所以这组测试是读路径唯一的护栏，
+  不可跳过。新增按 ID 读取的接口时，同时加一条跨组织用例。
 - 属性/模糊测试：复杂 context、文件名和过滤参数。
-- 压力测试：峰值提交和大租户 Inbox——重点是验证 §8.3 的读放大在真实数据量下
+- 压力测试：峰值提交和大租户 Inbox——重点是验证 §8.4 的读放大在真实数据量下
   仍然可接受。
-- 恢复测试：PITR 恢复到新表、对象清理和 deletion tombstone 重放。
+- 恢复测试：从备份恢复到新库、对象清理和 deletion tombstone 重放。
 
 ### 15.3 发布门禁
 
-- 格式化、静态检查、单元/契约/越权测试、依赖漏洞扫描，以及 `sam validate`。
+- 格式化、静态检查、单元/契约/越权测试、依赖漏洞扫描，以及 `compose-smoke`
+  （镜像构建与完整栈冒烟）。
 - OpenAPI breaking-change 检测。
 - SDK bundle size / App size 增量预算。
 - 关键用户流程 E2E：匿名提交、已识别提交、附件和后台处理。
@@ -844,25 +828,26 @@ aws s3 sync web/demo       "s3://$(terraform -chdir=infrastructure/terraform/exa
 
 ### Phase 1：可靠采集闭环 —— 已完成
 
-- Go 模块化单体、DynamoDB 单表、基础可观测性。
+- Go 模块化单体、PostgreSQL、基础可观测性。
 - 三个 SDK 包（`@pinpost/core`、`@pinpost/react`、`@pinpost/react-native`）：初始化、
   默认 UI、文本反馈、图片附件、上下文和会话内重试；附件预签名直传、类型/大小
   校验和恶意文件扫描。
 - 管理后台：反馈列表、详情、四状态工作流、活动记录、批量编辑和概览统计。
 - 多租户、固定角色 RBAC、条件写幂等和限流。
-- 超出原计划提前落地的：签名 webhook 与由变更流驱动的投递（原属 Phase 2），
-  以及整套无服务器化改造。
+- 超出原计划提前落地的：签名 webhook 与带重试阶梯的投递（原属 Phase 2）。存储
+  一度改成跑在 Lambda 上的 DynamoDB 单表；为了让自部署只需要 `docker compose up`，
+  现已迁回 PostgreSQL 单容器（旧实现保留在 tag `aws-lambda-dynamodb`）。
 
 退出条件已满足：三个平台提交后均可在后台可靠查看，跨租户越权测试通过。
-剩余收尾项：真实 AWS 账号上的首次部署验证。
+剩余收尾项：在真实服务器上完成首次自部署验证。
 
 ### Phase 2：增强采集与团队集成
 
 - 一键截图、敏感区域涂抹和跨重启离线队列；只在试点证明需要时实施。
-- 更丰富的搜索、筛选和统计（触发条件见 §8.3/§8.4）。
-- Email 通知；消费死信队列的 webhook 重放函数（§11.2）。
+- 更丰富的搜索、筛选和统计（触发条件见 §8.4/§8.5）。
+- Email 通知。
 - 隐私导出/删除、可配置保留策略。
-- 未认领附件对象的生命周期清理（当前它们的 item 会过期，但 S3 对象留在桶里）。
+- 未认领附件对象的清理（当前它们的行会被清理，但对象还留在桶里）。
 
 退出条件：弱网/中断恢复、恶意附件隔离、Webhook 重试和恢复演练通过。
 
@@ -870,22 +855,23 @@ aws s3 sync web/demo       "s3://$(terraform -chdir=infrastructure/terraform/exa
 
 - 聚合报表、配额与用量计费。
 - SSO/SCIM、第三方工单集成。
-- `GSI2`、独立搜索或跨区域全局表仅在指标证明需要时引入。
+- 复合筛选索引、独立搜索或跨区域复制，只在指标证明需要时引入。
 - AI 辅助分类与摘要，保留人工确认和关闭开关。
 
 ## 17. 关键决策与理由
 
 | 决策 | 当前选择 | 重新评估触发条件 |
 |---|---|---|
-| 计算形态 | Go 模块化单体跑在 Lambda 上，经 Web Adapter 层适配 | 持续高流量下按调用计费贵于常驻容器，或冷启动无法满足 SLO |
-| 主数据库 | DynamoDB 单表 | 需要联表、跨分区事务或即席分析查询 |
-| 搜索 | 单组织分区内存过滤 | 单组织数据量或查询延迟不达标（§8.3） |
-| 状态筛选 | `FilterExpression` 读放大 | 单组织反馈量超过约 5 万条，改加 `GSI2` |
-| 异步机制 | DynamoDB Streams 直接派生事件 | 需要超过一小时的投递保证，或事件需要独立于表结构演进 |
-| 投递重试 | 事件源重试 6 次约 1 小时 + 死信队列 | 订阅者需要关系库时代的 24 小时阶梯，则增加死信队列重放函数 |
+| 计算形态 | 单个 Go 进程（容器），HTTP 与后台循环同进程 | 扫描或投递开始影响 API 延迟时，拆出独立的 worker 模式 |
+| 主数据库 | PostgreSQL | 单库写入吞吐或容量成为瓶颈时，评估读副本或分区 |
+| 搜索 | 组织范围内 `ILIKE` | 延迟不达标时先加 `pg_trgm`，再评估独立搜索（§8.4） |
+| 状态筛选 | 组织范围内 WHERE 过滤 | 单组织反馈量超过约 5 万条，加复合索引 |
+| 异步机制 | 事务内写 outbox + 后台轮询（`SKIP LOCKED`） | 投递延迟要求低于 2 秒时加 LISTEN/NOTIFY；出现跨服务消费者时再引入队列 |
+| 投递重试 | 7 次、约 20 小时的退避阶梯，之后标为 failed | 订阅者需要更长的保证或自动补发 |
 | 附件上传 | 客户端直传对象存储，事后异步扫描 | 合规要求内容必须经过同步代理检查 |
-| 后台认证 | 自持 bcrypt 密码 + 服务端 session item | 企业客户要求 SSO/SCIM |
-| 边缘入口 | 单个 CloudFront 分发，`/v1/*` 回源 Function URL | 需要 WAF 规则集、多区域或自定义域名策略 |
+| 后台认证 | 自持 bcrypt 密码 + `sessions` 表 | 企业客户要求 SSO/SCIM |
+| 边缘入口 | 部署方自己的 HTTPS 反向代理 | 出现托管或 SaaS 形态时再统一提供 |
+| 部署 | 一个镜像 + PostgreSQL + S3 兼容存储，`docker-compose.yml` 是参考部署 | 有托管部署需求时再提供对应的 IaC 模板 |
 | 跨端实现 | 共享 TS Core；React Native 与 React 各自实现 UI | 原生平台能力或体积要求需要独立 Swift/Kotlin SDK |
 | API | Versioned REST/JSON，OpenAPI 为唯一事实来源 | 公开生态明确需要 GraphQL 或流式协议 |
 | SDK 鉴权 | Public Write Key + 可选服务端签名用户身份 | 高风险行业要求所有提交均由可信服务端授权 |
@@ -932,17 +918,17 @@ aws s3 sync web/demo       "s3://$(terraform -chdir=infrastructure/terraform/exa
 ## 20. 配套产物清单
 
 Phase 1 已经实现，下面这份清单从「开始实现前依次完成」变成了「哪些还欠着」。
-已完成：4（OpenAPI 契约，已是唯一事实来源）、5（单表键设计，见 §8）、
+已完成：4（OpenAPI 契约，已是唯一事实来源）、5（数据模型与访问模式，见 §8）、
 7 中的预签名上传与身份签名两个 spike。仍然欠着的是 1、2、3、6、8：
 
 1. 产品需求文档：锁定 MVP 用户、场景、字段、通知和回复边界。
 2. 低保真交互原型：提交面板、成功态、Inbox、详情页。
 3. Threat Model：重点评审多租户、公开 Write Key、附件和 Webhook SSRF。
 4. OpenAPI 草案：先定义 SDK 与服务端契约，再并行开发。
-5. 单表键设计与访问模式清单（本文 §8）。
+5. 数据模型与访问模式清单（本文 §8）。
 6. SDK RFC：包结构、兼容矩阵、主题、离线语义和隐私默认值。
 7. 三个 Spike：React Native 截图、预签名上传、用户身份签名验证。
 8. ADR 集合和按 Phase 拆分的工程任务清单。
 
-其中 Threat Model 优先级最高：多租户隔离在这套存储上没有行级安全可退守（§8.5），
+其中 Threat Model 优先级最高：多租户隔离在读路径上没有行级安全可退守（§8.2），
 公开 Write Key 与 Webhook SSRF 也已经是线上面向公网的真实攻击面。
