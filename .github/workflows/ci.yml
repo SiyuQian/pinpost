@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # DynamoDB Local and MinIO, the same two containers used locally.
+      # DynamoDB Local and RustFS, the same two containers used locally.
       - run: docker compose up -d --wait
       - run: go vet ./...
       - name: Verify generated API code matches the spec

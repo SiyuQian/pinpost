@@ -1,7 +1,7 @@
 package main
 
 // Contract test: exercises the real HTTP API against a live DynamoDB Local and
-// MinIO, and validates every response against api/openapi.yaml. Skips when
+// RustFS, and validates every response against api/openapi.yaml. Skips when
 // DynamoDB is unreachable (set AWS_ENDPOINT_URL; defaults to docker compose).
 
 import (
@@ -48,7 +48,7 @@ type contractClient struct {
 	covered map[string]map[int]bool
 }
 
-// testBucket is created in MinIO on first use; DynamoDB Local and MinIO both
+// testBucket is created in RustFS on first use; DynamoDB Local and RustFS both
 // come from docker compose.
 const testBucket = "pinpost-test"
 
@@ -76,7 +76,7 @@ func newContractClient(t *testing.T) *contractClient {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Object storage lives on its own endpoint (MinIO in docker compose).
+	// Object storage lives on its own endpoint (RustFS in docker compose).
 	if os.Getenv("S3_ENDPOINT_URL") == "" {
 		os.Setenv("S3_ENDPOINT_URL", "http://localhost:9000")
 	}

@@ -749,7 +749,7 @@ Boundaries：附件在扫描完成前即可关联到反馈，因为 SDK 可能�
 
 ### 14.1 环境
 
-- Local：`docker compose up` 启动 DynamoDB Local 与 MinIO，`go run ./cmd/server`
+- Local：`docker compose up` 启动 DynamoDB Local 与 RustFS，`go run ./cmd/server`
   直接跑同一个二进制。表和桶在启动时按需创建，没有迁移步骤，也不需要
   Lambda 模拟器。
 - CI：同样两个容器，跑单元测试、契约测试（kin-openapi 校验每个规格操作）和
@@ -812,7 +812,7 @@ aws s3 sync web/demo       "s3://$(terraform -chdir=infrastructure/terraform/exa
 ### 15.2 Backend
 
 - 领域单元测试：状态机、权限、配额、保留策略、`derive()` 的流记录到事件映射。
-- 集成测试跑在 DynamoDB Local 与 MinIO 上：条件写、事务、并发冲突和索引查询都用
+- 集成测试跑在 DynamoDB Local 与 RustFS 上：条件写、事务、并发冲突和索引查询都用
   真实引擎验证，不用 mock。
 - 契约测试对着 `api/openapi.yaml` 逐个操作跑，用 kin-openapi 校验请求与响应，
   任何未被覆盖的规格操作直接判失败。

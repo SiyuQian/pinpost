@@ -39,7 +39,7 @@ const Meta = "#META"
 const BootstrapMarker = "#BOOTSTRAP"
 
 // AWSConfig loads credentials/region and honours AWS_ENDPOINT_URL so the whole
-// stack can point at DynamoDB Local and MinIO without any code branch.
+// stack can point at DynamoDB Local and RustFS without any code branch.
 func AWSConfig(ctx context.Context) (aws.Config, error) {
 	opts := []func(*awsconfig.LoadOptions) error{}
 	if ep := os.Getenv("AWS_ENDPOINT_URL"); ep != "" {
@@ -198,7 +198,7 @@ func ConditionFailed(err error) bool {
 }
 
 // EnsureBucket creates the attachment bucket if it is missing. Deployments
-// declare it in infrastructure/terraform/modules/pinpost/s3.tf; this is for the local MinIO container.
+// declare it in infrastructure/terraform/modules/pinpost/s3.tf; this is for the local RustFS container.
 func EnsureBucket(ctx context.Context, client *s3.Client, bucket string) error {
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: &bucket})
 	var owned *s3types.BucketAlreadyOwnedByYou
@@ -209,7 +209,7 @@ func EnsureBucket(ctx context.Context, client *s3.Client, bucket string) error {
 	return err
 }
 
-// NewS3 builds the object-storage client. S3_ENDPOINT_URL points it at MinIO
+// NewS3 builds the object-storage client. S3_ENDPOINT_URL points it at RustFS
 // for local development, which only speaks path-style addressing.
 func NewS3(cfg aws.Config) *s3.Client {
 	endpoint := os.Getenv("S3_ENDPOINT_URL")
