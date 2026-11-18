@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
 	"github.com/jackc/pgx/v5"
@@ -317,5 +319,29 @@ func TestSignIsStable(t *testing.T) {
 	if got := Sign("whsec_test", 1700000000, []byte(`{"a":1}`)); got !=
 		"38877139021993b830af32feea6e18a8da83eb2f6e49ee50bd9e4cf4ca4d3789" {
 		t.Errorf("signature changed: %s", got)
+	}
+}
+
+// Postgres text rejects invalid UTF-8 and NUL; the outcome must still be recorded.
+func TestDeliverRecordsNonUTF8ResponseBody(t *testing.T) {
+	body := "\x00" + strings.Repeat("a", 1022) + "世" + "tail"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	h := newHarness(t)
+	ep := h.endpoint(t, srv.URL)
+	h.enqueue(t, "feedback.created.v1")
+	h.dispatch(t)
+	d := h.deliveries(t, ep.ID)[0]
+	if d.Status != "succeeded" || d.Attempt != 1 {
+		t.Fatalf("status=%s attempt=%d, want succeeded/1", d.Status, d.Attempt)
+	}
+	if !utf8.ValidString(d.ResponseBody) || strings.Contains(d.ResponseBody, "\x00") {
+		t.Fatalf("response_body not clean: %q", d.ResponseBody)
+	}
+	if !strings.HasPrefix(d.ResponseBody, strings.Repeat("a", 1022)) {
+		t.Fatalf("response_body content lost")
 	}
 }
