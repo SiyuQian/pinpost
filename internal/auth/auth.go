@@ -224,8 +224,8 @@ func (m *Member) CanWrite() bool {
 }
 
 // secureCookies reports whether the session cookie may carry the Secure flag.
-// The Lambda Web Adapter speaks plain HTTP to this server even when the caller
-// used HTTPS, so r.TLS is always nil in a deployment; the Function URL sets
+// The reverse proxy in front of a deployment terminates TLS and speaks plain
+// HTTP to this server, so r.TLS is nil there; the proxy sets
 // X-Forwarded-Proto, and its absence means local http development. A direct
 // caller forging the header only makes its own cookie stricter.
 func secureCookies(r *http.Request) bool {

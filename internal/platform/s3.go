@@ -21,8 +21,8 @@ func AWSConfig(ctx context.Context) (aws.Config, error) {
 	return awsconfig.LoadDefaultConfig(ctx, opts...)
 }
 
-// EnsureBucket creates the attachment bucket if it is missing; this is for the
-// local RustFS container.
+// EnsureBucket creates the attachment bucket if it is missing, so a fresh
+// RustFS container works without a setup step.
 func EnsureBucket(ctx context.Context, client *s3.Client, bucket string) error {
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: &bucket})
 	var owned *s3types.BucketAlreadyOwnedByYou
@@ -46,6 +46,22 @@ func NewS3(cfg aws.Config) *s3.Client {
 		if endpoint != "" {
 			o.BaseEndpoint = &endpoint
 			o.UsePathStyle = true
+		}
+	})
+}
+
+// NewPresign signs the upload and download URLs handed to browsers.
+// S3_PUBLIC_ENDPOINT_URL is the address browsers reach object storage at when
+// it differs from the server's own: inside docker compose the server talks to
+// http://s3:9000, which no browser can resolve.
+func NewPresign(client *s3.Client) *s3.PresignClient {
+	public := os.Getenv("S3_PUBLIC_ENDPOINT_URL")
+	return s3.NewPresignClient(client, func(o *s3.PresignOptions) {
+		if public != "" {
+			o.ClientOptions = append(o.ClientOptions, func(o *s3.Options) {
+				o.BaseEndpoint = &public
+				o.UsePathStyle = true
+			})
 		}
 	})
 }

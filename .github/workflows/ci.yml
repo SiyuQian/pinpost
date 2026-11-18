@@ -21,7 +21,7 @@ jobs:
         with:
           go-version-file: go.mod
       # Postgres and RustFS, the same containers used locally.
-      - run: docker compose up -d --wait
+      - run: docker compose up -d --wait postgres s3
       - run: go vet ./...
       - name: Verify generated API code matches the spec
         run: |
@@ -34,6 +34,29 @@ jobs:
           AWS_REGION: us-east-1
           AWS_ACCESS_KEY_ID: pinpost
           AWS_SECRET_ACCESS_KEY: pinpost-secret
+
+  # The self-hosting path end to end: build the image, start the whole
+  # compose stack, sign in as the seeded owner and submit through the SDK API.
+  compose-smoke:
+    runs-on: ubuntu-latest
+    env:
+      PINPOST_ADMIN_EMAIL: owner@example.com
+      PINPOST_ADMIN_PASSWORD: compose-smoke-password
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker compose up -d --wait --build
+      - name: Sign in and submit feedback
+        run: |
+          for _ in $(seq 30); do curl -fsS localhost:8787/healthz && break; sleep 1; done
+          curl -fsS -c jar -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$PINPOST_ADMIN_EMAIL\",\"password\":\"$PINPOST_ADMIN_PASSWORD\"}" \
+            localhost:8787/v1/auth/login
+          key=$(curl -fsS -b jar localhost:8787/v1/projects | jq -r '.projects[0].WriteKey')
+          curl -fsS -H "X-Pinpost-Write-Key: $key" -H 'Content-Type: application/json' \
+            -H "Idempotency-Key: $(cat /proc/sys/kernel/random/uuid)" \
+            -d '{"type":"bug","message":"compose smoke"}' localhost:8787/v1/feedback
+      - if: failure()
+        run: docker compose logs
 
   web:
     runs-on: ubuntu-latest

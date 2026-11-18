@@ -77,9 +77,9 @@ func TestCORS(t *testing.T) {
 	}
 }
 
-// Behind CloudFront and the Lambda Web Adapter, RemoteAddr is the same
-// loopback address for every request; without the header the per-IP rate limit
-// collapses into one bucket per project.
+// Behind a reverse proxy, RemoteAddr is the proxy's address for every request;
+// without the header the per-IP rate limit collapses into one bucket per
+// project.
 func TestClientIPPrefersForwardedFor(t *testing.T) {
 	for _, c := range []struct {
 		name, xff, remote, want string

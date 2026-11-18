@@ -10,16 +10,19 @@ malware scanning with quarantine.
 
 ## Quick start
 
+To run Pinpost itself, see [Self-hosting](#self-hosting). To work on it:
+
 ```bash
-docker compose up -d --wait          # Postgres (:5432) + RustFS (:9000)
+docker compose up -d --wait postgres s3   # Postgres (:5432) + RustFS (:9000)
 npm --prefix web/admin ci            # admin console dependencies (first run only)
 npm --prefix web/admin run build     # build the admin console into web/admin/dist
 source ./local.env                   # point the server at those two containers
 PINPOST_SEED_DEMO=1 go run ./cmd/server   # API + static pages (localhost:8787)
 ```
 
-`cmd/server` is an ordinary HTTP server. The table and bucket are created on
-boot when the endpoints point at the local containers.
+`cmd/server` is an ordinary HTTP server. It applies database migrations on
+boot, creates the bucket when it is missing, and runs the background work
+(webhook delivery, attachment scanning, expiry sweeps) in the same process.
 
 The Go server serves the admin console from `web/admin/dist`, so build it once
 before the first boot. If you skip the build, `/admin/` explains what to run
@@ -43,7 +46,8 @@ All optional; the defaults suit local development.
 |---|---|---|
 | `DATABASE_URL` | — | **Required.** PostgreSQL connection URL, e.g. `postgres://pinpost:pinpost@localhost:5432/pinpost?sslmode=disable`. Migrations run on boot. |
 | `PINPOST_BUCKET` | `pinpost-attachments` | S3 bucket for attachments |
-| `S3_ENDPOINT_URL` | *(real AWS)* | Object storage endpoint. Setting it means local S3 (RustFS): path-style addressing and the bucket created on boot. |
+| `S3_ENDPOINT_URL` | *(AWS S3)* | Endpoint of an S3-compatible store (RustFS, MinIO, R2). Uses path-style addressing and creates the bucket on boot if it is missing — or logs a warning if the keys cannot. |
+| `S3_PUBLIC_ENDPOINT_URL` | `S3_ENDPOINT_URL` | The address browsers reach object storage at, when it differs from the server's (inside docker compose the server uses `http://s3:9000`, browsers `http://localhost:9000`). Upload and download URLs are signed for it. |
 | `ADDR` | `:8787` | Listen address |
 | `PINPOST_RATE_LIMIT` | `60` | Ingestion requests per project+IP per minute, counted in memory per server process (two replicas allow twice as many). The IP is the leftmost `X-Forwarded-For` hop, falling back to the socket peer. |
 | `CORS_ALLOWED_ORIGINS` | *(any origin)* | Comma-separated origin allowlist for the public ingestion endpoints. The write key is public by design, so this is hygiene rather than a security boundary. Attachment bytes are not covered — they go straight to S3, whose own CORS configuration governs them. |
@@ -218,12 +222,41 @@ add the sparse `GSI2PK = ORG#<org>#STATUS#<s>` index.
 - Objects whose feedback submission never arrived stay in the bucket. Their row is swept after 24 hours, so they are invisible and unreferenced; deleting the object in the same sweep is the upgrade when the orphan bytes cost something.
 - Email / one-tap screenshot / cross-restart offline queue are Phase 2.
 
-## Deploying
+## Self-hosting
 
-Pinpost is moving from AWS Lambda + DynamoDB to a single container backed by
-PostgreSQL and any S3-compatible object store, started with `docker compose up`.
-Until that lands there is no supported deployment path. The serverless
-Terraform stack is preserved at the `aws-lambda-dynamodb` git tag.
+Pinpost is one container plus PostgreSQL (15 or newer) and an S3-compatible
+object store. `docker-compose.yml` runs all three:
+
+```bash
+export PINPOST_ADMIN_EMAIL=you@example.com PINPOST_ADMIN_PASSWORD='choose-a-long-one'
+docker compose up -d
+```
+
+Then open http://localhost:8787/admin/ and sign in. The first boot creates the
+schema and the first owner, organization and project; later boots apply new
+migrations and leave existing data alone. The project's write key is on the
+console's 嵌入与集成 page.
+
+To put it on a server:
+
+- Put an HTTPS reverse proxy (Caddy, nginx, a load balancer) in front of port
+  8787. Session cookies are marked `Secure` when the proxy sends
+  `X-Forwarded-Proto: https`, and the rate limiter reads the client address from
+  `X-Forwarded-For` — so do not expose 8787 directly.
+- Browsers upload attachments straight to object storage. Publish RustFS (or
+  point at your own store) under an address browsers can reach, set
+  `S3_PUBLIC_ENDPOINT_URL` to it, and allow your sites' origins in the store's
+  CORS rules.
+- Replace the compose file's sample database and RustFS credentials.
+- Back up Postgres (`pg_dump`, or your provider's snapshots) and the bucket
+  together: feedback rows reference attachment objects by key.
+- Several replicas can share one database: migrations take an advisory lock,
+  and webhook delivery and scanning claim rows with `SKIP LOCKED`. The ingest
+  rate limit is counted per replica.
+
+On AWS, run the same image on ECS, App Runner or Lightsail with RDS and S3.
+The earlier serverless stack (Lambda + DynamoDB, Terraform) is preserved at the
+`aws-lambda-dynamodb` git tag.
 
 ## License
 

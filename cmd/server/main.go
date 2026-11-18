@@ -36,7 +36,7 @@ func env(key, fallback string) string {
 // newServer wires the domain slices behind the generated spec router.
 // Shared with the contract test, which also reaches into the slices directly.
 func newServer(db *pgxpool.Pool, s3c *s3.Client, bucket string) *api.Server {
-	att := &attachment.Service{DB: db, S3: s3c, Presign: s3.NewPresignClient(s3c), Bucket: bucket}
+	att := &attachment.Service{DB: db, S3: s3c, Presign: platform.NewPresign(s3c), Bucket: bucket}
 	proj := &project.Service{DB: db}
 	return &api.Server{
 		Auth:          &auth.Service{DB: db},
@@ -70,8 +70,7 @@ func newMux(srv *api.Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	srv.Handler(mux)
 
-	// Static apps: the admin SPA (built by Vite) and the SDK demo. In the
-	// deployed stack CloudFront serves these from S3 and never reaches here.
+	// Static apps: the admin SPA (built by Vite) and the SDK demo.
 	mux.Handle("GET /admin/", http.StripPrefix("/admin/", spaHandler(adminDist)))
 	mux.Handle("GET /demo/", http.StripPrefix("/demo/", http.FileServer(http.Dir("web/demo"))))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -89,8 +88,12 @@ func newMux(srv *api.Server) *http.ServeMux {
 			return nil
 		}))
 	}
+	// Healthy means able to serve: the database answers.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
+		if err := srv.Auth.DB.Ping(r.Context()); err != nil {
+			http.Error(w, "database unreachable", http.StatusServiceUnavailable)
+			return
+		}
 		w.Write([]byte("ok"))
 	})
 	return mux
@@ -218,9 +221,11 @@ func main() {
 
 	s3c, bucket := platform.NewS3(cfg), env("PINPOST_BUCKET", "pinpost-attachments")
 	if os.Getenv("S3_ENDPOINT_URL") != "" {
+		// A self-hosted store (RustFS, MinIO, R2) may hand out keys that cannot
+		// create buckets; that is a setup step for its owner, not a reason to
+		// refuse to boot.
 		if err := platform.EnsureBucket(ctx, s3c, bucket); err != nil {
-			slog.Error("bucket setup failed", "error", err)
-			os.Exit(1)
+			slog.Warn("could not create the attachment bucket; create it in your object store", "bucket", bucket, "error", err)
 		}
 	}
 	server := newServer(db, s3c, bucket)
