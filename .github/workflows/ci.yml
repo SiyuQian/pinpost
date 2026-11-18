@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # DynamoDB Local and MinIO, the same two containers used locally.
+      - run: docker compose up -d --wait
+      - run: go vet ./...
+      - name: Verify generated API code matches the spec
+        run: |
+          go generate ./internal/api
+          git diff --exit-code internal/api/gen.go
+      - run: go test ./... -count=1
+        env:
+          AWS_ENDPOINT_URL: http://localhost:8000
+          S3_ENDPOINT_URL: http://localhost:9000
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: pinpost
+          AWS_SECRET_ACCESS_KEY: pinpost-secret
+
+  # The Terraform config is never exercised by the test job, so nothing else
+  # catches a bad reference or a wrong attribute until `terraform apply` fails
+  # against a real account.
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Terraform
+        run: |
+          curl -fsSL https://releases.hashicorp.com/terraform/1.14.8/terraform_1.14.8_linux_amd64.zip -o /tmp/tf.zip
+          sudo unzip -oq /tmp/tf.zip -d /usr/local/bin
+      - run: terraform -chdir=infrastructure/terraform fmt -check -recursive
+      - run: terraform -chdir=infrastructure/terraform/example init -backend=false
+      - run: terraform -chdir=infrastructure/terraform/example validate
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/admin/package-lock.json
+      - run: npm ci
+        working-directory: web/admin
+      - name: Type-check and build the admin app
+        run: npm run build
+        working-directory: web/admin
+      - name: Unit-test the admin app
+        run: npm test
+        working-directory: web/admin
+
+  # The SDK's own suite: stripQuery is a security control (it keeps reset/SSO
+  # tokens and basic-auth credentials out of stored records), and until this job
+  # existed its regression tests only ran by hand.
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - run: npm ci
+        working-directory: sdk
+      - name: Build and unit-test the SDK packages
+        run: npm test
+        working-directory: sdk
+
+  openapi-breaking:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check for breaking API changes vs base branch
+        run: |
+          if ! git cat-file -e "origin/${{ github.base_ref }}:api/openapi.yaml" 2>/dev/null; then
+            echo "No spec on base branch yet; skipping."
+            exit 0
+          fi
+          git show "origin/${{ github.base_ref }}:api/openapi.yaml" > /tmp/base-openapi.yaml
+          # --err-ignore holds the breaking changes the team accepted, one
+          # line each with the reason; see api/breaking-changes-accepted.txt.
+          docker run --rm -v /tmp/base-openapi.yaml:/base.yaml -v "$PWD/api/openapi.yaml":/head.yaml \
+            -v "$PWD/api/breaking-changes-accepted.txt":/accepted.txt \
+            tufin/oasdiff:v1.28.0@sha256:86830f988eaafcf589acb2794ee5ab78e3300ded071d6517bf085469300cbf36 breaking /base.yaml /head.yaml --fail-on ERR --err-ignore /accepted.txt

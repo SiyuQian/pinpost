@@ -1,0 +1,1063 @@
+openapi: 3.0.3
+info:
+  title: Pinpost API
+  description: >
+    Contract for the Pinpost feedback system. Ingestion endpoints authenticate
+    with a public project Write Key; Dashboard endpoints use a member session
+    cookie. This file is the source of truth — the contract test validates the
+    live server against it, and CI rejects breaking changes.
+  version: 0.1.0
+
+servers:
+  - url: http://localhost:8787
+
+tags:
+  - name: ingestion
+    description: SDK-facing endpoints (public Write Key)
+  - name: dashboard
+    description: Member-facing endpoints (session cookie)
+
+paths:
+  /v1/sdk/config:
+    get:
+      tags: [ingestion]
+      operationId: getSdkConfig
+      summary: Fetch the published SDK configuration for a project
+      security: [{ writeKey: [] }]
+      responses:
+        "200":
+          description: Published configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [environment, settings]
+                properties:
+                  environment: { type: string }
+                  settings: { type: object }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /v1/attachment-uploads:
+    post:
+      tags: [ingestion]
+      operationId: createAttachmentUpload
+      summary: Register attachment metadata and get a signed upload URL
+      security: [{ writeKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [original_name, mime_type, size]
+              properties:
+                original_name: { type: string, maxLength: 255 }
+                mime_type:
+                  type: string
+                  enum: [image/jpeg, image/png, image/webp, text/plain]
+                size: { type: integer, minimum: 1, maximum: 10485760 }
+      responses:
+        "201":
+          description: Upload authorized
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attachment_id, upload_url, expires_at]
+                properties:
+                  attachment_id: { type: string, format: uuid }
+                  upload_url: { type: string, format: uri, description: Presigned object-storage PUT URL }
+                  expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /v1/feedback:
+    post:
+      tags: [ingestion]
+      operationId: createFeedback
+      summary: Submit feedback
+      description: >
+        Replays with the same Idempotency-Key return the originally created
+        record with status 201.
+      security: [{ writeKey: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, message]
+              properties:
+                type: { $ref: "#/components/schemas/FeedbackType" }
+                message: { type: string, minLength: 1, maxLength: 10000 }
+                rating: { type: integer, minimum: 1, maximum: 5, nullable: true }
+                contact:
+                  type: object
+                  properties:
+                    email: { type: string, maxLength: 320 }
+                external_user_id: { type: string }
+                context:
+                  type: object
+                  description: Blacklisted keys (password, authorization, cookie, token, secret) are dropped server-side.
+                attachment_ids:
+                  type: array
+                  maxItems: 5
+                  items: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Created (or idempotent replay of an earlier creation)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [feedback_id, created_at]
+                properties:
+                  feedback_id: { type: string, format: uuid }
+                  created_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [dashboard]
+      operationId: listFeedback
+      summary: Cursor-paginated feedback inbox
+      security: [{ session: [] }]
+      parameters:
+        - { name: project_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/FeedbackStatus" } }
+        - { name: type, in: query, schema: { $ref: "#/components/schemas/FeedbackType" } }
+        - { name: source, in: query, schema: { $ref: "#/components/schemas/FeedbackSource" } }
+        - { name: assignee_id, in: query, schema: { type: string, format: uuid } }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: One page of feedback, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/FeedbackListItem" }
+                  next_cursor:
+                    type: string
+                    description: Empty string when there are no more pages.
+        "401": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/internal-feedback:
+    post:
+      tags: [dashboard]
+      operationId: createInternalFeedback
+      summary: File feedback from the dashboard
+      description: >
+        Creates a report on behalf of the signed-in member. Identical to
+        ingestion except that it authenticates with the session cookie instead
+        of a write key, takes an explicit project_id, and stores
+        `source: internal` so the inbox can tell staff-filed reports apart from
+        customer ones. Replays with the same Idempotency-Key return the
+        originally created record with status 201.
+      security: [{ session: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project_id, type, message]
+              properties:
+                project_id: { type: string, format: uuid }
+                type: { $ref: "#/components/schemas/FeedbackType" }
+                message: { type: string, minLength: 1, maxLength: 10000 }
+                rating: { type: integer, minimum: 1, maximum: 5, nullable: true }
+                contact:
+                  type: object
+                  description: Who the report is about, when it stands in for a named customer.
+                  properties:
+                    email: { type: string, maxLength: 320 }
+      responses:
+        "201":
+          description: Created (or idempotent replay of an earlier creation)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [feedback_id, created_at]
+                properties:
+                  feedback_id: { type: string, format: uuid }
+                  created_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/feedback/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [dashboard]
+      operationId: getFeedback
+      summary: Feedback detail with attachments
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: Detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeedbackDetail" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [dashboard]
+      operationId: updateFeedback
+      summary: Update workflow fields (status, priority, assignee, tags)
+      description: >
+        Status changes must follow the state machine
+        (open ⇄ in_progress → resolved → reopen; spam → open). Pass updated_at
+        for optimistic concurrency; a stale value returns 409.
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { $ref: "#/components/schemas/FeedbackStatus" }
+                priority: { $ref: "#/components/schemas/FeedbackPriority" }
+                assignee_id:
+                  type: string
+                  description: Member UUID; empty string clears the assignee.
+                tags:
+                  type: array
+                  maxItems: 20
+                  items: { type: string }
+                updated_at: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Updated detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeedbackDetail" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/feedback/{id}/notes:
+    post:
+      tags: [dashboard]
+      operationId: addFeedbackNote
+      summary: Add an internal note to the feedback timeline
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Note]
+              properties:
+                Note: { type: string, minLength: 1, maxLength: 5000 }
+      responses:
+        "201":
+          description: Note recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/feedback/{id}/activities:
+    get:
+      tags: [dashboard]
+      operationId: listFeedbackActivities
+      summary: Feedback processing timeline
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Activities in chronological order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activities]
+                properties:
+                  activities:
+                    type: array
+                    items: { $ref: "#/components/schemas/Activity" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/attachments/{id}/download:
+    get:
+      tags: [dashboard]
+      operationId: downloadAttachment
+      summary: Download a scanned attachment (org-scoped)
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "302":
+          description: Redirect to a short-lived presigned object URL
+          headers:
+            Location:
+              required: true
+              schema: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/auth/login:
+    post:
+      tags: [dashboard]
+      operationId: login
+      summary: Sign in with email and password; sets the session cookie
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Email, Password]
+              properties:
+                Email: { type: string }
+                Password: { type: string }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [member, organization]
+                properties:
+                  member: { $ref: "#/components/schemas/Member" }
+                  organization:
+                    type: object
+                    required: [ID, Name]
+                    properties:
+                      ID: { type: string, format: uuid }
+                      Name: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/auth/config:
+    get:
+      tags: [dashboard]
+      operationId: getAuthConfig
+      summary: Public sign-in configuration for the admin app
+      description: >
+        The Google client id is public by design; serving it at runtime keeps one
+        build usable across environments that have different clients.
+      responses:
+        "200":
+          description: Configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [google_client_id]
+                properties:
+                  google_client_id:
+                    type: string
+                    description: Empty when Google sign-in is not configured.
+
+  /v1/auth/google:
+    post:
+      tags: [dashboard]
+      operationId: googleLogin
+      summary: Sign in with a Google ID token; sets the session cookie
+      description: >
+        Accepts the credential from Google Identity Services. Only addresses on
+        the server's allowlist may sign in; an allowed address without a member
+        record gets one on first sign-in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Credential]
+              properties:
+                Credential: { type: string, description: Google ID token (JWT) }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [member, organization]
+                properties:
+                  member: { $ref: "#/components/schemas/Member" }
+                  organization:
+                    type: object
+                    required: [ID, Name]
+                    properties:
+                      ID: { type: string, format: uuid }
+                      Name: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /v1/auth/logout:
+    post:
+      tags: [dashboard]
+      operationId: logout
+      summary: Invalidate the session
+      responses:
+        "200":
+          description: Signed out
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /v1/me:
+    get:
+      tags: [dashboard]
+      operationId: getMe
+      summary: Current authenticated member
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: Current member
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [member, organization]
+                properties:
+                  member: { $ref: "#/components/schemas/Member" }
+                  organization:
+                    type: object
+                    required: [ID, Name]
+                    properties:
+                      ID: { type: string, format: uuid }
+                      Name: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/setup:
+    get:
+      tags: [dashboard]
+      operationId: getSetupState
+      summary: Which onboarding steps this organization has actually completed
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: Setup state, derived from what the workspace contains
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupState" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/projects:
+    get:
+      tags: [dashboard]
+      operationId: listProjects
+      summary: Projects in the member's organization
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: Projects
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects]
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      type: object
+                      required: [ID, Name, Environment]
+                      properties:
+                        ID: { type: string, format: uuid }
+                        Name: { type: string }
+                        Environment: { type: string }
+                        WriteKey:
+                          type: string
+                          description: >-
+                            The project's public ingestion key, as pasted into
+                            the SDK. Absent on projects created before it was
+                            stored readable; rotating once fills it in.
+        "401": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [dashboard]
+      operationId: createProject
+      summary: Create a project in the member's organization
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Name]
+              properties:
+                Name: { type: string, minLength: 1, maxLength: 120 }
+                # Allowlisted rather than free text: the console renders a
+                # production badge by exact match, so an arbitrary label would
+                # claim production while styled as anything but.
+                Environment: { type: string, enum: [development, production] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ID, Name, Environment, WriteKey]
+                properties:
+                  ID: { type: string, format: uuid }
+                  Name: { type: string }
+                  Environment: { type: string }
+                  WriteKey: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/organization:
+    patch:
+      tags: [dashboard]
+      operationId: updateOrganization
+      summary: Rename the organization
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Name]
+              properties:
+                Name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ID, Name]
+                properties:
+                  ID: { type: string, format: uuid }
+                  Name: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{id}:
+    patch:
+      tags: [dashboard]
+      operationId: updateProject
+      summary: Rename a project
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Name]
+              properties:
+                Name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ID, Name, Environment]
+                properties:
+                  ID: { type: string, format: uuid }
+                  Name: { type: string }
+                  Environment: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/projects/{id}/write-key/rotate:
+    post:
+      tags: [dashboard]
+      operationId: rotateProjectWriteKey
+      summary: Replace a project's write key
+      description: >-
+        Issues a new write key and revokes the old one in the same transaction.
+        Every SDK still configured with the old key is refused from then on, so
+        this is for a leaked or abused key, not routine housekeeping.
+        Owner/admin only.
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ID, Name, Environment, WriteKey]
+                properties:
+                  ID: { type: string, format: uuid }
+                  Name: { type: string }
+                  Environment: { type: string }
+                  WriteKey: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/members:
+    get:
+      tags: [dashboard]
+      operationId: listMembers
+      summary: Active members in the organization
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members]
+                properties:
+                  members:
+                    type: array
+                    items:
+                      type: object
+                      required: [ID, Email, Name, Role]
+                      properties:
+                        ID: { type: string, format: uuid }
+                        Email: { type: string }
+                        Name: { type: string }
+                        Role: { $ref: "#/components/schemas/Role" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/analytics/overview:
+    get:
+      tags: [dashboard]
+      operationId: getAnalyticsOverview
+      summary: Counts by status/type and a 14-day trend
+      security: [{ session: [] }]
+      parameters:
+        - name: project_id
+          in: query
+          description: >
+            Narrow every count to one project, so the dashboard's numbers match
+            the inbox below them when a project is selected. Omit for the whole
+            organization.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, by_status, by_type, trend]
+                properties:
+                  total: { type: integer }
+                  by_status:
+                    type: object
+                    additionalProperties: { type: integer }
+                  by_type:
+                    type: object
+                    additionalProperties: { type: integer }
+                  trend:
+                    type: array
+                    items:
+                      type: object
+                      required: [day, count]
+                      properties:
+                        day: { type: string }
+                        count: { type: integer }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/webhook-endpoints:
+    get:
+      tags: [dashboard]
+      operationId: listWebhookEndpoints
+      summary: List webhook endpoints (secrets omitted)
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: Endpoints
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [endpoints]
+                properties:
+                  endpoints:
+                    type: array
+                    items: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [dashboard]
+      operationId: createWebhookEndpoint
+      summary: Register a webhook endpoint; the signing secret is returned only once
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, maxLength: 2048 }
+                event_types:
+                  type: array
+                  description: Empty or omitted subscribes to all event types.
+                  items: { $ref: "#/components/schemas/WebhookEventType" }
+      responses:
+        "201":
+          description: Created; save the secret, it is not shown again
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/webhook-endpoints/{id}:
+    delete:
+      tags: [dashboard]
+      operationId: deleteWebhookEndpoint
+      summary: Delete a webhook endpoint and its delivery history
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [dashboard]
+      operationId: updateWebhookEndpoint
+      summary: Pause or resume an endpoint; resuming resets the failure counter
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, paused] }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /v1/webhook-endpoints/{id}/deliveries:
+    get:
+      tags: [dashboard]
+      operationId: listWebhookDeliveries
+      summary: Recent deliveries for an endpoint (latest 50)
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deliveries]
+                properties:
+                  deliveries:
+                    type: array
+                    items: { $ref: "#/components/schemas/WebhookDelivery" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/webhook-deliveries/{id}/replay:
+    post:
+      tags: [dashboard]
+      operationId: replayWebhookDelivery
+      summary: Re-queue a finished delivery; the event ID stays the same
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Re-queued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    writeKey:
+      type: apiKey
+      in: header
+      name: X-Pinpost-Write-Key
+      description: Public project write key. Grants submission only, never reads.
+    session:
+      type: apiKey
+      in: cookie
+      name: pinpost_session
+
+  responses:
+    Error:
+      description: Error envelope with a stable machine code
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+              description: Stable machine code (validation_failed, invalid_write_key, unauthenticated, forbidden, not_found, conflict, invalid_transition, rate_limited, ...)
+            message: { type: string }
+            request_id: { type: string }
+            fields:
+              type: object
+              nullable: true
+              additionalProperties: { type: string }
+
+    FeedbackType:
+      type: string
+      enum: [bug, suggestion, other]
+
+    FeedbackSource:
+      type: string
+      description: >
+        Who filed the report. `widget` is everything the public ingestion
+        endpoint accepted; `internal` is a report a member filed from the
+        dashboard. Decided server-side from the authenticated caller and fixed
+        for the life of the record — no update path can change it.
+      enum: [widget, internal]
+
+    FeedbackStatus:
+      type: string
+      enum: [open, in_progress, resolved, spam]
+
+    FeedbackPriority:
+      type: string
+      enum: [none, low, medium, high, urgent]
+
+    Role:
+      type: string
+      enum: [owner, admin, agent, viewer]
+
+    FeedbackListItem:
+      type: object
+      required: [id, type, message, source, status, priority, tags, project_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/FeedbackType" }
+        message: { type: string }
+        contact_email: { type: string, nullable: true }
+        url:
+          type: string
+          nullable: true
+          description: >
+            Page the report was submitted from, with the query string, fragment
+            and userinfo removed — that is where reset tokens, SSO codes and
+            basic-auth credentials live. Scheme, host and path are kept verbatim
+            so deep links survive. Both the SDK and ingest strip them, so the
+            guarantee holds for direct posts too. Projected from the submission
+            context so the inbox can show where a row came from without carrying
+            the whole blob.
+        user_agent:
+          type: string
+          nullable: true
+          description: Submitting user agent, projected from the submission context.
+        source: { $ref: "#/components/schemas/FeedbackSource" }
+        rating: { type: integer, nullable: true, minimum: 1, maximum: 5 }
+        status: { $ref: "#/components/schemas/FeedbackStatus" }
+        priority: { $ref: "#/components/schemas/FeedbackPriority" }
+        assignee_id: { type: string, format: uuid, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        project_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    FeedbackDetail:
+      allOf:
+        - $ref: "#/components/schemas/FeedbackListItem"
+        - type: object
+          # The full context is a detail-only field: list rows carry just the
+          # url/user_agent projection, so one project's large contexts cannot
+          # inflate every inbox page in the organization.
+          required: [context, attachments]
+          properties:
+            external_user_id: { type: string, nullable: true }
+            contact_email: { type: string, nullable: true }
+            context: { type: object }
+            attachments:
+              type: array
+              items:
+                type: object
+                required: [id, original_name, mime_type, size, scan_status]
+                properties:
+                  id: { type: string, format: uuid }
+                  original_name: { type: string }
+                  mime_type: { type: string }
+                  size: { type: integer }
+                  scan_status: { type: string, enum: [pending, clean, flagged, rejected] }
+
+    SetupState:
+      type: object
+      description: >
+        Every field is derived from data the workspace already holds — no step
+        is tracked as a flag someone can tick without doing the thing.
+      required:
+        [install_widget, invite_members, connect_notifications,
+         feedback_total, member_count, endpoint_count]
+      properties:
+        install_widget:
+          type: boolean
+          description: At least one piece of feedback has been received.
+        invite_members:
+          type: boolean
+          description: The organization has more than one active member.
+        connect_notifications:
+          type: boolean
+          description: At least one webhook endpoint is active.
+        feedback_total: { type: integer }
+        member_count: { type: integer }
+        endpoint_count: { type: integer }
+
+    Activity:
+      type: object
+      required: [id, actor_type, activity_type, data, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        actor_type: { type: string, enum: [member, system, end_user] }
+        actor_id: { type: string, format: uuid, nullable: true }
+        activity_type:
+          type: string
+          description: created, status_changed, priority_changed, assigned, tags_changed, note_added
+        data: { type: object }
+        created_at: { type: string, format: date-time }
+
+    WebhookEventType:
+      type: string
+      enum:
+        - feedback.created.v1
+        - feedback.status_changed.v1
+        - feedback.assigned.v1
+        - feedback.note_added.v1
+
+    WebhookEndpoint:
+      type: object
+      required: [id, url, event_types, status, consecutive_failures, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string }
+        event_types:
+          type: array
+          items: { $ref: "#/components/schemas/WebhookEventType" }
+        status: { type: string, enum: [active, paused] }
+        consecutive_failures: { type: integer }
+        created_at: { type: string, format: date-time }
+        secret:
+          type: string
+          description: Present only in the create response.
+
+    WebhookDelivery:
+      type: object
+      required: [id, event_id, event_type, attempt, status, response_body, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        event_type: { $ref: "#/components/schemas/WebhookEventType" }
+        attempt: { type: integer }
+        status: { type: string, enum: [pending, succeeded, failed] }
+        next_attempt_at: { type: string, format: date-time, nullable: true }
+        response_status: { type: integer, nullable: true }
+        response_body: { type: string }
+        latency_ms: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Member:
+      type: object
+      required: [ID, OrganizationID, Email, Name, Role]
+      properties:
+        ID: { type: string, format: uuid }
+        OrganizationID: { type: string, format: uuid }
+        Email: { type: string }
+        Name: { type: string }
+        Role: { $ref: "#/components/schemas/Role" }

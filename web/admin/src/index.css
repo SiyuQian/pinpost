@@ -1,0 +1,176 @@
+@import "tailwindcss";
+@import "./fonts.css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.963 0.006 275);
+  --foreground: oklch(0.22 0.025 275);
+  --card: oklch(1 0 0);
+
+  /* Layered surfaces above --card, and the hairline the console is drawn with.
+     The console reads as one sheet of panels rather than a stack of boxes, so
+     depth comes from these three greys plus --shadow-lift, not from borders. */
+  --panel-2: oklch(0.976 0.005 275);
+  --panel-3: oklch(0.955 0.008 275);
+  --glass: oklch(1 0 0 / 74%);
+  --brand-deep: oklch(0.44 0.16 288);
+  --card-foreground: oklch(0.21 0.02 264);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.02 264);
+  --primary: oklch(0.54 0.18 274);
+  --primary-foreground: oklch(0.99 0.004 274);
+  --secondary: oklch(0.968 0.005 275);
+  --secondary-foreground: oklch(0.28 0.02 275);
+  --muted: oklch(0.968 0.005 275);
+  --muted-foreground: oklch(0.56 0.02 275);
+  --accent: oklch(0.968 0.005 275);
+  --accent-foreground: oklch(0.28 0.02 275);
+  --destructive: oklch(0.58 0.21 27);
+  --border: oklch(0.912 0.009 275);
+  --input: oklch(0.912 0.009 275);
+  --ring: oklch(0.54 0.18 274);
+
+  /* Workflow semantics — deliberately separate from the brand accent. */
+  --status-open: oklch(0.55 0.18 264);
+  --status-open-bg: oklch(0.955 0.025 264);
+  --status-progress: oklch(0.58 0.13 70);
+  --status-progress-bg: oklch(0.96 0.045 85);
+  --status-resolved: oklch(0.55 0.13 160);
+  --status-resolved-bg: oklch(0.955 0.04 160);
+  --status-spam: oklch(0.58 0.015 264);
+  --status-spam-bg: oklch(0.955 0.004 264);
+  --prio-urgent: oklch(0.55 0.2 27);
+  --prio-high: oklch(0.6 0.15 55);
+  --prio-medium: oklch(0.55 0.02 264);
+  --prio-low: oklch(0.68 0.015 264);
+
+  /* Brand panel gradient. Defined only here and never in .dark: the panel
+     always carries white text, so its background must not follow --primary
+     into the lighter dark-mode ramp. Darker than --primary on purpose —
+     white 14px copy measures 5.05:1 against 0.5 and only 3.46:1 against 0.58. */
+  --brand-panel-from: oklch(0.5 0.19 268);
+  --brand-panel-to: oklch(0.45 0.17 285);
+}
+
+.dark {
+  --background: oklch(0.155 0.014 275);
+  --foreground: oklch(0.96 0.006 275);
+  --card: oklch(0.2 0.016 275);
+  --panel-2: oklch(0.235 0.017 275);
+  --panel-3: oklch(0.26 0.018 275);
+  --glass: oklch(0.2 0.016 275 / 78%);
+  --brand-deep: oklch(0.62 0.17 288);
+  --card-foreground: oklch(0.95 0.006 264);
+  --popover: oklch(0.23 0.016 264);
+  --popover-foreground: oklch(0.95 0.006 264);
+  --primary: oklch(0.74 0.15 274);
+  --primary-foreground: oklch(0.16 0.014 275);
+  --secondary: oklch(0.26 0.016 264);
+  --secondary-foreground: oklch(0.95 0.006 264);
+  --muted: oklch(0.26 0.016 264);
+  --muted-foreground: oklch(0.68 0.017 264);
+  --accent: oklch(0.28 0.018 264);
+  --accent-foreground: oklch(0.95 0.006 264);
+  --destructive: oklch(0.65 0.19 25);
+  --border: oklch(1 0 0 / 13%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.74 0.15 274);
+
+  --status-open: oklch(0.75 0.13 264);
+  --status-open-bg: oklch(0.32 0.06 264);
+  --status-progress: oklch(0.79 0.12 80);
+  --status-progress-bg: oklch(0.33 0.06 75);
+  --status-resolved: oklch(0.76 0.13 162);
+  --status-resolved-bg: oklch(0.3 0.06 162);
+  --status-spam: oklch(0.7 0.012 264);
+  --status-spam-bg: oklch(0.29 0.008 264);
+  --prio-urgent: oklch(0.72 0.16 25);
+  --prio-high: oklch(0.78 0.13 70);
+  --prio-medium: oklch(0.72 0.015 264);
+  --prio-low: oklch(0.58 0.015 264);
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-panel-2: var(--panel-2);
+  --color-panel-3: var(--panel-3);
+  --color-brand-deep: var(--brand-deep);
+  --shadow-lift: 0 1px 2px oklch(0.22 0.02 275 / 6%), 0 8px 20px -14px oklch(0.22 0.02 275 / 40%);
+  --shadow-lift-2: 0 2px 4px oklch(0.22 0.02 275 / 7%), 0 20px 44px -24px oklch(0.22 0.02 275 / 50%);
+  --color-status-open: var(--status-open);
+  --color-status-open-bg: var(--status-open-bg);
+  --color-status-progress: var(--status-progress);
+  --color-status-progress-bg: var(--status-progress-bg);
+  --color-status-resolved: var(--status-resolved);
+  --color-status-resolved-bg: var(--status-resolved-bg);
+  --color-status-spam: var(--status-spam);
+  --color-status-spam-bg: var(--status-spam-bg);
+  --color-prio-urgent: var(--prio-urgent);
+  --color-prio-high: var(--prio-high);
+  --color-prio-medium: var(--prio-medium);
+  --color-prio-low: var(--prio-low);
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    letter-spacing: -0.006em;
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+  /* Per-person avatar tint. The hue arrives as an inline --tint (see
+     lib/avatar.ts) because it is data-derived, but the lightness ramp has to
+     flip with the theme, which an inline style cannot do — so the two ramps
+     live here and only the hue crosses the boundary. */
+  .avatar-tint {
+    background: oklch(0.93 0.05 var(--tint));
+    color: oklch(0.42 0.14 var(--tint));
+    box-shadow: inset 0 0 0 1px oklch(0.42 0.14 var(--tint) / 18%);
+  }
+  .dark .avatar-tint {
+    background: oklch(0.31 0.065 var(--tint));
+    color: oklch(0.87 0.09 var(--tint));
+    box-shadow: inset 0 0 0 1px oklch(1 0 0 / 14%);
+  }
+  /* Small-caps data label: the console's section headers, column heads and
+     metric titles all use it, so it lives here rather than being retyped as a
+     six-class run at every call site. */
+  .cap {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+}

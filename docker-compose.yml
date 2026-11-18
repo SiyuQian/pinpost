@@ -1,0 +1,36 @@
+services:
+  dynamodb:
+    image: amazon/dynamodb-local
+    container_name: pinpost-dynamodb
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8000 && echo -e 'GET / HTTP/1.1\\n\\n' >&3"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio:
+    # MinIO no longer publishes to Docker Hub — `minio/minio` 404s there and
+    # Docker reports it as "pull access denied", which is what broke CI. quay.io
+    # is their own registry; pinned so a future retag cannot break the build.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: pinpost-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: pinpost
+      MINIO_ROOT_PASSWORD: pinpost-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - pinpost-objects:/data
+
+volumes:
+  pinpost-objects:

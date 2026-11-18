@@ -1,0 +1,1193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="Pinpost 跨平台反馈系统的产品、架构、接口、数据、安全、运维与交付设计。"
+    />
+    <title>Pinpost · 跨平台反馈系统设计</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <style>
+      :root {
+        color-scheme: light;
+        --page: #f3f2ed;
+        --surface: rgba(255, 255, 252, 0.88);
+        --surface-solid: #fffefa;
+        --surface-soft: #ecebe4;
+        --ink: #171815;
+        --muted: #676960;
+        --faint: #8e9087;
+        --line: rgba(23, 24, 21, 0.12);
+        --line-strong: rgba(23, 24, 21, 0.2);
+        --accent: #23614f;
+        --accent-soft: #dfeee7;
+        --accent-ink: #144838;
+        --code: #20231f;
+        --code-ink: #e9eee9;
+        --warning: #89551c;
+        --shadow: 0 24px 80px rgba(40, 43, 35, 0.08);
+        --sidebar-width: 292px;
+        --content-width: 920px;
+        --radius-sm: 10px;
+        --radius-md: 18px;
+        --radius-lg: 28px;
+      }
+
+      html[data-theme="dark"] {
+        color-scheme: dark;
+        --page: #141613;
+        --surface: rgba(28, 31, 27, 0.88);
+        --surface-solid: #1c1f1b;
+        --surface-soft: #252923;
+        --ink: #f0f1ea;
+        --muted: #b0b3a8;
+        --faint: #888d82;
+        --line: rgba(239, 242, 234, 0.12);
+        --line-strong: rgba(239, 242, 234, 0.2);
+        --accent: #74c3a6;
+        --accent-soft: #1e3c32;
+        --accent-ink: #a8e2cc;
+        --code: #0d0f0d;
+        --code-ink: #edf2ed;
+        --warning: #e3b678;
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.2);
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        overflow-x: hidden;
+        scroll-behavior: smooth;
+        scroll-padding-top: 92px;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        overflow-x: hidden;
+        background:
+          radial-gradient(circle at 85% -15%, rgba(107, 171, 147, 0.14), transparent 34rem),
+          var(--page);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        font-size: 16px;
+        line-height: 1.72;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button,
+      a {
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      a {
+        color: var(--accent);
+        text-underline-offset: 0.2em;
+      }
+
+      a:focus-visible,
+      button:focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+        outline-offset: 3px;
+      }
+
+      .reading-progress {
+        position: fixed;
+        z-index: 100;
+        inset: 0 0 auto;
+        height: 3px;
+        background: transparent;
+      }
+
+      .reading-progress__bar {
+        display: block;
+        width: 0;
+        height: 100%;
+        background: var(--accent);
+        transition: width 100ms linear;
+      }
+
+      .topbar {
+        position: sticky;
+        z-index: 50;
+        top: 0;
+        display: flex;
+        min-height: 72px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 12px clamp(18px, 4vw, 56px);
+        border-bottom: 1px solid var(--line);
+        background: color-mix(in srgb, var(--page) 82%, transparent);
+        backdrop-filter: blur(18px) saturate(140%);
+      }
+
+      .brand {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 13px;
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .brand__mark {
+        display: grid;
+        width: 38px;
+        height: 38px;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 12px;
+        background: var(--ink);
+        color: var(--surface-solid);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 13px;
+        font-weight: 760;
+        letter-spacing: -0.06em;
+      }
+
+      .brand__copy {
+        min-width: 0;
+      }
+
+      .brand__name,
+      .brand__meta {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .brand__name {
+        font-weight: 760;
+        letter-spacing: -0.02em;
+      }
+
+      .brand__meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .topbar__actions {
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .action-button {
+        display: inline-flex;
+        min-height: 40px;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0 15px;
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 680;
+        transition:
+          border-color 160ms ease,
+          background 160ms ease,
+          transform 160ms ease;
+      }
+
+      .action-button:hover {
+        border-color: var(--line-strong);
+        background: var(--surface-solid);
+        transform: translateY(-1px);
+      }
+
+      .action-button--menu {
+        display: none;
+      }
+
+      .layout {
+        display: grid;
+        width: min(calc(100% - 40px), 1360px);
+        margin: 0 auto;
+        grid-template-columns: var(--sidebar-width) minmax(0, var(--content-width));
+        justify-content: center;
+        gap: clamp(36px, 6vw, 88px);
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 92px;
+        align-self: start;
+        height: calc(100vh - 116px);
+        padding: 5px 0 28px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+      }
+
+      .sidebar__eyebrow {
+        margin: 0 0 12px 12px;
+        color: var(--faint);
+        font-size: 11px;
+        font-weight: 760;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .toc {
+        display: grid;
+        gap: 2px;
+      }
+
+      .toc a {
+        display: block;
+        border-left: 2px solid transparent;
+        border-radius: 0 9px 9px 0;
+        padding: 7px 12px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+        text-decoration: none;
+        transition:
+          color 140ms ease,
+          background 140ms ease,
+          border-color 140ms ease;
+      }
+
+      .toc a:hover {
+        background: var(--surface);
+        color: var(--ink);
+      }
+
+      .toc a[aria-current="true"] {
+        border-left-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+        font-weight: 680;
+      }
+
+      .document {
+        min-width: 0;
+        padding: clamp(48px, 8vw, 104px) 0 120px;
+      }
+
+      .hero {
+        margin-bottom: 68px;
+        padding-bottom: 48px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .hero__kicker {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        margin-bottom: 20px;
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 760;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .hero__kicker::before {
+        width: 28px;
+        height: 1px;
+        background: currentColor;
+        content: "";
+      }
+
+      .hero h1 {
+        max-width: 800px;
+        margin: 0;
+        font-family: Georgia, "Noto Serif SC", "Songti SC", serif;
+        font-size: clamp(44px, 7vw, 78px);
+        font-weight: 520;
+        letter-spacing: -0.055em;
+        line-height: 1.06;
+      }
+
+      .hero__lead {
+        max-width: 720px;
+        margin: 26px 0 0;
+        color: var(--muted);
+        font-size: clamp(17px, 2.1vw, 21px);
+        line-height: 1.7;
+      }
+
+      .hero__meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 30px;
+      }
+
+      .meta-pill {
+        display: inline-flex;
+        min-height: 34px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0 13px;
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .summary-grid {
+        display: grid;
+        margin-bottom: 74px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .summary-card {
+        min-height: 150px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+        padding: 22px;
+        background: var(--surface);
+        box-shadow: 0 8px 32px rgba(40, 43, 35, 0.025);
+      }
+
+      .summary-card__number {
+        display: block;
+        margin-bottom: 24px;
+        color: var(--accent);
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 32px;
+        line-height: 1;
+      }
+
+      .summary-card__label {
+        display: block;
+        color: var(--ink);
+        font-size: 14px;
+        font-weight: 730;
+      }
+
+      .summary-card__detail {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .markdown-body > h1:first-child,
+      .markdown-body > blockquote:first-of-type {
+        display: none;
+      }
+
+      .markdown-body h2,
+      .markdown-body h3,
+      .markdown-body h4 {
+        position: relative;
+        color: var(--ink);
+        scroll-margin-top: 96px;
+      }
+
+      .markdown-body h2 {
+        margin: 96px 0 30px;
+        padding-top: 28px;
+        border-top: 1px solid var(--line);
+        font-family: Georgia, "Noto Serif SC", "Songti SC", serif;
+        font-size: clamp(30px, 4.6vw, 44px);
+        font-weight: 520;
+        letter-spacing: -0.035em;
+        line-height: 1.2;
+      }
+
+      .markdown-body h2:first-of-type {
+        margin-top: 0;
+      }
+
+      .markdown-body h3 {
+        margin: 50px 0 18px;
+        font-size: 21px;
+        font-weight: 760;
+        letter-spacing: -0.02em;
+        line-height: 1.35;
+      }
+
+      .markdown-body h4 {
+        margin: 34px 0 14px;
+        font-size: 17px;
+      }
+
+      .heading-anchor {
+        position: absolute;
+        right: 100%;
+        margin-right: 10px;
+        color: var(--faint);
+        opacity: 0;
+        text-decoration: none;
+        transition: opacity 120ms ease;
+      }
+
+      .markdown-body h2:hover .heading-anchor,
+      .markdown-body h3:hover .heading-anchor,
+      .markdown-body h4:hover .heading-anchor,
+      .heading-anchor:focus-visible {
+        opacity: 1;
+      }
+
+      .markdown-body p,
+      .markdown-body li {
+        color: var(--muted);
+      }
+
+      .markdown-body p {
+        margin: 0 0 18px;
+      }
+
+      .markdown-body strong {
+        color: var(--ink);
+        font-weight: 720;
+      }
+
+      .markdown-body ul,
+      .markdown-body ol {
+        margin: 0 0 24px;
+        padding-left: 1.45em;
+      }
+
+      .markdown-body li {
+        margin: 7px 0;
+        padding-left: 0.25em;
+      }
+
+      .markdown-body li::marker {
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      .markdown-body blockquote {
+        margin: 28px 0;
+        border-left: 3px solid var(--accent);
+        border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+        padding: 18px 22px;
+        background: var(--accent-soft);
+      }
+
+      .markdown-body blockquote p {
+        margin: 0;
+        color: var(--accent-ink);
+      }
+
+      .table-wrap {
+        width: 100%;
+        margin: 26px 0 34px;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+        background: var(--surface-solid);
+        box-shadow: var(--shadow);
+      }
+
+      .markdown-body table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      .markdown-body th,
+      .markdown-body td {
+        min-width: 120px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .markdown-body th {
+        background: var(--surface-soft);
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 760;
+        letter-spacing: 0.035em;
+      }
+
+      .markdown-body td {
+        color: var(--muted);
+      }
+
+      .markdown-body tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .markdown-body code {
+        border-radius: 5px;
+        padding: 0.15em 0.38em;
+        background: var(--surface-soft);
+        color: var(--accent-ink);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 0.88em;
+      }
+
+      .code-shell {
+        position: relative;
+        margin: 26px 0 34px;
+      }
+
+      .code-shell__label {
+        position: absolute;
+        z-index: 1;
+        top: 13px;
+        right: 14px;
+        color: rgba(233, 238, 233, 0.52);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .markdown-body pre {
+        margin: 0;
+        overflow-x: auto;
+        border: 1px solid color-mix(in srgb, var(--code) 78%, white);
+        border-radius: var(--radius-md);
+        padding: 48px 22px 22px;
+        background: var(--code);
+        box-shadow: var(--shadow);
+        color: var(--code-ink);
+        line-height: 1.65;
+        tab-size: 2;
+      }
+
+      .markdown-body pre code {
+        padding: 0;
+        background: transparent;
+        color: inherit;
+        font-size: 13px;
+      }
+
+      .mermaid-shell {
+        margin: 32px 0 44px;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-lg);
+        padding: 28px;
+        background: var(--surface-solid);
+        box-shadow: var(--shadow);
+      }
+
+      .mermaid-shell .mermaid {
+        display: flex;
+        min-width: 700px;
+        justify-content: center;
+      }
+
+      .loading,
+      .load-error {
+        display: grid;
+        min-height: 320px;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-lg);
+        background: var(--surface);
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .load-error {
+        padding: 32px;
+        color: var(--warning);
+      }
+
+      .back-to-top {
+        position: fixed;
+        right: clamp(16px, 3vw, 34px);
+        bottom: clamp(16px, 3vw, 34px);
+        z-index: 40;
+        display: grid;
+        width: 44px;
+        height: 44px;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        background: var(--surface-solid);
+        box-shadow: 0 12px 36px rgba(20, 24, 20, 0.14);
+        color: var(--ink);
+        cursor: pointer;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(8px);
+        transition:
+          opacity 160ms ease,
+          transform 160ms ease;
+      }
+
+      .back-to-top.is-visible {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+      }
+
+      .sidebar-scrim {
+        display: none;
+      }
+
+      @media (max-width: 960px) {
+        .layout {
+          display: block;
+          width: min(calc(100% - 36px), 760px);
+        }
+
+        .sidebar {
+          position: fixed;
+          z-index: 80;
+          inset: 0 auto 0 0;
+          width: min(84vw, 340px);
+          height: 100vh;
+          padding: 92px 22px 32px;
+          border-right: 1px solid var(--line);
+          background: var(--surface-solid);
+          transform: translateX(-102%);
+          transition: transform 220ms ease;
+        }
+
+        body[data-menu-open="true"] .sidebar {
+          transform: translateX(0);
+        }
+
+        .sidebar-scrim {
+          position: fixed;
+          z-index: 70;
+          inset: 0;
+          display: block;
+          border: 0;
+          background: rgba(10, 12, 10, 0.46);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 220ms ease;
+        }
+
+        body[data-menu-open="true"] {
+          overflow: hidden;
+        }
+
+        body[data-menu-open="true"] .sidebar-scrim {
+          opacity: 1;
+          pointer-events: auto;
+        }
+
+        .action-button--menu {
+          display: inline-flex;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .topbar {
+          min-height: 64px;
+          padding-inline: 14px;
+        }
+
+        .brand__meta,
+        .action-button__label,
+        .action-button--print {
+          display: none;
+        }
+
+        .action-button {
+          width: 40px;
+          padding: 0;
+        }
+
+        .document {
+          padding-top: 50px;
+        }
+
+        .hero {
+          margin-bottom: 42px;
+          padding-bottom: 38px;
+        }
+
+        .hero h1 {
+          font-size: clamp(42px, 13vw, 58px);
+        }
+
+        .summary-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .summary-card {
+          min-height: 0;
+        }
+
+        .summary-card__number {
+          margin-bottom: 14px;
+        }
+
+        .markdown-body h2 {
+          margin-top: 72px;
+          font-size: 31px;
+        }
+
+        .markdown-body h3 {
+          margin-top: 42px;
+          font-size: 19px;
+        }
+
+        .heading-anchor {
+          display: none;
+        }
+
+        .mermaid-shell {
+          margin-inline: -4px;
+          padding: 18px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      @media print {
+        :root {
+          --page: #fff;
+          --surface-solid: #fff;
+          --ink: #111;
+          --muted: #333;
+          --line: #d7d7d7;
+        }
+
+        body {
+          background: #fff;
+          font-size: 10.5pt;
+        }
+
+        .topbar,
+        .sidebar,
+        .sidebar-scrim,
+        .reading-progress,
+        .back-to-top {
+          display: none !important;
+        }
+
+        .layout {
+          display: block;
+          width: 100%;
+        }
+
+        .document {
+          padding: 0;
+        }
+
+        .hero {
+          min-height: 45vh;
+          padding-top: 12vh;
+          page-break-after: always;
+        }
+
+        .hero h1 {
+          font-size: 42pt;
+        }
+
+        .summary-grid {
+          page-break-after: always;
+        }
+
+        .markdown-body h2 {
+          break-after: avoid;
+          page-break-after: avoid;
+        }
+
+        .markdown-body h3,
+        .markdown-body h4,
+        .table-wrap,
+        .code-shell,
+        .mermaid-shell {
+          break-inside: avoid;
+        }
+
+        .table-wrap,
+        .code-shell,
+        .mermaid-shell {
+          box-shadow: none;
+        }
+      }
+    </style>
+  </head>
+  <body data-menu-open="false">
+    <div class="reading-progress" aria-hidden="true">
+      <span class="reading-progress__bar" id="reading-progress"></span>
+    </div>
+
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="返回文档顶部">
+        <span class="brand__mark" aria-hidden="true">FB</span>
+        <span class="brand__copy">
+          <span class="brand__name">Pinpost</span>
+          <span class="brand__meta">System Design · 2026</span>
+        </span>
+      </a>
+
+      <div class="topbar__actions">
+        <button
+          class="action-button action-button--menu"
+          id="menu-button"
+          type="button"
+          aria-controls="document-navigation"
+          aria-expanded="false"
+        >
+          <span aria-hidden="true">☰</span>
+          <span class="action-button__label">目录</span>
+        </button>
+        <button
+          class="action-button"
+          id="theme-button"
+          type="button"
+          aria-label="切换深色或浅色主题"
+        >
+          <span id="theme-icon" aria-hidden="true">◐</span>
+          <span class="action-button__label" id="theme-label">深色</span>
+        </button>
+        <button
+          class="action-button action-button--print"
+          id="print-button"
+          type="button"
+        >
+          <span aria-hidden="true">↗</span>
+          <span>打印 / PDF</span>
+        </button>
+      </div>
+    </header>
+
+    <button class="sidebar-scrim" id="sidebar-scrim" type="button" aria-label="关闭目录"></button>
+
+    <div class="layout">
+      <aside class="sidebar" id="document-navigation" aria-label="文档目录">
+        <p class="sidebar__eyebrow">Contents</p>
+        <nav class="toc" id="table-of-contents"></nav>
+      </aside>
+
+      <main class="document" id="top">
+        <section class="hero" aria-labelledby="page-title">
+          <p class="hero__kicker">Architecture Brief</p>
+          <h1 id="page-title">跨平台反馈系统设计</h1>
+          <p class="hero__lead">
+            React Native 与 React 共享反馈协议和提交核心，各自提供平台原生 UI；Go 模块化单体跑在 Lambda 上，配合 DynamoDB 单表与 S3 直传，完成可靠采集与处理闭环。
+          </p>
+          <div class="hero__meta" aria-label="文档信息">
+            <span class="meta-pill">Phase 1 Shipped</span>
+            <span class="meta-pill">Shared Core · Native UI</span>
+            <span class="meta-pill">Go on Lambda · Single Table</span>
+            <span class="meta-pill">20 Chapters</span>
+          </div>
+        </section>
+
+        <section class="summary-grid" aria-label="设计摘要">
+          <article class="summary-card">
+            <span class="summary-card__number">02</span>
+            <span class="summary-card__label">平台 SDK</span>
+            <span class="summary-card__detail">React Native 与 React 共享协议，不强行共享 UI</span>
+          </article>
+          <article class="summary-card">
+            <span class="summary-card__number">01</span>
+            <span class="summary-card__label">DynamoDB 单表</span>
+            <span class="summary-card__detail">一个稀疏索引，TTL 自动过期，任何路径上都没有 Scan</span>
+          </article>
+          <article class="summary-card">
+            <span class="summary-card__number">03</span>
+            <span class="summary-card__label">Lambda 函数</span>
+            <span class="summary-card__detail">API、附件扫描、Webhook 投递；无常驻实例、无 VPC</span>
+          </article>
+        </section>
+
+        <article class="markdown-body" id="document-content" aria-live="polite">
+          <div class="loading">正在加载完整系统设计</div>
+        </article>
+      </main>
+    </div>
+
+    <button class="back-to-top" id="back-to-top" type="button" aria-label="返回顶部">↑</button>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+    <script>
+      (() => {
+        const page = document.documentElement;
+        const body = document.body;
+        const content = document.querySelector("#document-content");
+        const tableOfContents = document.querySelector("#table-of-contents");
+        const menuButton = document.querySelector("#menu-button");
+        const sidebarScrim = document.querySelector("#sidebar-scrim");
+        const themeButton = document.querySelector("#theme-button");
+        const themeLabel = document.querySelector("#theme-label");
+        const themeIcon = document.querySelector("#theme-icon");
+        const printButton = document.querySelector("#print-button");
+        const progressBar = document.querySelector("#reading-progress");
+        const backToTop = document.querySelector("#back-to-top");
+        const themeStorageKey = "pinpost-document-theme";
+
+        function slugify(value) {
+          return value
+            .trim()
+            .toLowerCase()
+            .replace(/[\s/]+/g, "-")
+            .replace(/[^\p{L}\p{N}-]/gu, "")
+            .replace(/-+/g, "-")
+            .replace(/^-|-$/g, "");
+        }
+
+        function uniqueHeadingId(text, knownIds) {
+          const baseId = slugify(text) || "section";
+          let headingId = baseId;
+          let suffix = 2;
+
+          while (knownIds.has(headingId)) {
+            headingId = `${baseId}-${suffix}`;
+            suffix += 1;
+          }
+
+          knownIds.add(headingId);
+          return headingId;
+        }
+
+        function enhanceHeadings() {
+          const knownIds = new Set();
+          const headings = [...content.querySelectorAll("h2, h3, h4")];
+
+          headings.forEach((heading) => {
+            const headingId = uniqueHeadingId(heading.textContent, knownIds);
+            const anchor = document.createElement("a");
+
+            heading.id = headingId;
+            anchor.className = "heading-anchor";
+            anchor.href = `#${headingId}`;
+            anchor.setAttribute("aria-label", `链接到 ${heading.textContent}`);
+            anchor.textContent = "#";
+            heading.prepend(anchor);
+          });
+
+          return headings;
+        }
+
+        function buildTableOfContents(headings) {
+          const fragment = document.createDocumentFragment();
+
+          headings
+            .filter((heading) => heading.tagName === "H2")
+            .forEach((heading) => {
+              const link = document.createElement("a");
+              link.href = `#${heading.id}`;
+              link.textContent = heading.textContent.replace(/^#/, "");
+              link.dataset.section = heading.id;
+              link.addEventListener("click", closeMenu);
+              fragment.append(link);
+            });
+
+          tableOfContents.replaceChildren(fragment);
+        }
+
+        function wrapTables() {
+          content.querySelectorAll("table").forEach((table) => {
+            const wrapper = document.createElement("div");
+            wrapper.className = "table-wrap";
+            wrapper.setAttribute("role", "region");
+            wrapper.setAttribute("aria-label", "可横向滚动的数据表格");
+            wrapper.tabIndex = 0;
+            table.before(wrapper);
+            wrapper.append(table);
+          });
+        }
+
+        function prepareCodeBlocks() {
+          content.querySelectorAll("pre").forEach((pre) => {
+            const code = pre.querySelector("code");
+
+            if (code?.classList.contains("language-mermaid")) {
+              const shell = document.createElement("div");
+              const diagram = document.createElement("div");
+              shell.className = "mermaid-shell";
+              diagram.className = "mermaid";
+              diagram.textContent = code.textContent;
+              pre.replaceWith(shell);
+              shell.append(diagram);
+              return;
+            }
+
+            const languageClass = [...(code?.classList || [])].find((name) =>
+              name.startsWith("language-"),
+            );
+            const language = languageClass?.replace("language-", "") || "code";
+            const shell = document.createElement("div");
+            const label = document.createElement("span");
+
+            shell.className = "code-shell";
+            label.className = "code-shell__label";
+            label.textContent = language;
+            pre.before(shell);
+            shell.append(label, pre);
+          });
+        }
+
+        function observeSections(headings) {
+          const links = new Map(
+            [...tableOfContents.querySelectorAll("a")].map((link) => [link.dataset.section, link]),
+          );
+          const visibleSections = new Map();
+          const observer = new IntersectionObserver(
+            (entries) => {
+              entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                  visibleSections.set(entry.target.id, entry.boundingClientRect.top);
+                } else {
+                  visibleSections.delete(entry.target.id);
+                }
+              });
+
+              const activeSection = [...visibleSections.entries()].sort(
+                (left, right) => left[1] - right[1],
+              )[0]?.[0];
+
+              if (!activeSection) {
+                return;
+              }
+
+              links.forEach((link, sectionId) => {
+                if (sectionId === activeSection) {
+                  link.setAttribute("aria-current", "true");
+                } else {
+                  link.removeAttribute("aria-current");
+                }
+              });
+            },
+            { rootMargin: "-86px 0px -68% 0px", threshold: 0 },
+          );
+
+          headings
+            .filter((heading) => heading.tagName === "H2")
+            .forEach((heading) => observer.observe(heading));
+        }
+
+        function updateReadingProgress() {
+          const scrollableHeight = document.documentElement.scrollHeight - window.innerHeight;
+          const progress = scrollableHeight > 0 ? window.scrollY / scrollableHeight : 0;
+          progressBar.style.width = `${Math.min(100, Math.max(0, progress * 100))}%`;
+          backToTop.classList.toggle("is-visible", window.scrollY > 640);
+        }
+
+        function openMenu() {
+          body.dataset.menuOpen = "true";
+          menuButton.setAttribute("aria-expanded", "true");
+        }
+
+        function closeMenu() {
+          body.dataset.menuOpen = "false";
+          menuButton.setAttribute("aria-expanded", "false");
+        }
+
+        function toggleMenu() {
+          if (body.dataset.menuOpen === "true") {
+            closeMenu();
+          } else {
+            openMenu();
+          }
+        }
+
+        function preferredTheme() {
+          const savedTheme = localStorage.getItem(themeStorageKey);
+
+          if (savedTheme === "light" || savedTheme === "dark") {
+            return savedTheme;
+          }
+
+          return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+
+        function applyTheme(theme) {
+          page.dataset.theme = theme;
+          themeLabel.textContent = theme === "dark" ? "浅色" : "深色";
+          themeIcon.textContent = theme === "dark" ? "○" : "●";
+        }
+
+        async function renderMermaid(theme) {
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",
+            theme: theme === "dark" ? "dark" : "neutral",
+            flowchart: { curve: "basis", htmlLabels: true },
+          });
+
+          await mermaid.run({ querySelector: ".mermaid" });
+        }
+
+        async function loadDocument() {
+          try {
+            const response = await fetch("./feedback-system-design.md", { cache: "no-store" });
+
+            if (!response.ok) {
+              throw new Error(`文档请求失败，状态码 ${response.status}`);
+            }
+
+            const markdown = await response.text();
+            marked.use({ gfm: true, breaks: false });
+            content.innerHTML = marked.parse(markdown);
+            const headings = enhanceHeadings();
+            buildTableOfContents(headings);
+            wrapTables();
+            prepareCodeBlocks();
+            observeSections(headings);
+            await renderMermaid(page.dataset.theme);
+            updateReadingProgress();
+          } catch (error) {
+            const errorMessage = document.createElement("div");
+            errorMessage.className = "load-error";
+            errorMessage.textContent = `设计文档暂时无法加载：${error.message}`;
+            content.replaceChildren(errorMessage);
+          }
+        }
+
+        applyTheme(preferredTheme());
+
+        menuButton.addEventListener("click", toggleMenu);
+        sidebarScrim.addEventListener("click", closeMenu);
+        themeButton.addEventListener("click", () => {
+          const nextTheme = page.dataset.theme === "dark" ? "light" : "dark";
+          localStorage.setItem(themeStorageKey, nextTheme);
+          window.location.reload();
+        });
+        printButton.addEventListener("click", () => window.print());
+        backToTop.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
+        window.addEventListener("scroll", updateReadingProgress, { passive: true });
+        window.addEventListener("resize", () => {
+          if (window.innerWidth > 960) {
+            closeMenu();
+          }
+        });
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") {
+            closeMenu();
+          }
+        });
+
+        loadDocument();
+      })();
+    </script>
+  </body>
+</html>

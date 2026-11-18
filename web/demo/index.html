@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinpost SDK Demo · Sample Host App</title>
+<style>
+  :root { color-scheme: light dark; --accent:#4f6ef7; --bg:#f6f7fb; --card:#fff; --text:#1c2030; --muted:#69708a; --line:#e3e6f0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12141c; --card:#1c1f2b; --text:#eceef6; --muted:#9aa1bd; --line:#2b2f40; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 15px/1.6 -apple-system, "Helvetica Neue", sans-serif; background:var(--bg); color:var(--text); }
+  .page { max-width: 720px; margin: 0 auto; padding: 48px 24px 120px; }
+  h1 { font-size: 26px; } .muted { color: var(--muted); }
+  .fab { position: fixed; right: 28px; bottom: 28px; background: var(--accent); color:#fff; border:none; border-radius: 999px; padding: 14px 22px; font-size:15px; cursor:pointer; box-shadow: 0 6px 24px rgba(79,110,247,.4); }
+  dialog { border:none; border-radius:16px; padding:0; width: min(440px, 92vw); background:var(--card); color:var(--text); box-shadow:0 24px 80px rgba(0,0,0,.25); }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  .panel { padding: 24px; }
+  .panel h2 { margin: 0 0 16px; font-size: 18px; }
+  .types { position:relative; margin-bottom:14px; }
+  .dd-trigger { width:100%; min-height:44px; display:flex; align-items:center; gap:8px; padding:8px 12px; border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; cursor:pointer; font:inherit; text-align:start; }
+  .dd-trigger:hover, .dd-trigger:focus-visible { border-color: var(--accent); }
+  .dd-trigger[aria-expanded="true"] { border-color: var(--accent); }
+  .dd-trigger .label { flex:1; min-width:0; }
+  .dd-trigger .chev { transition: transform .15s ease; }
+  .dd-trigger[aria-expanded="true"] .chev { transform: rotate(180deg); }
+  .dd-list { position:absolute; inset-inline:0; inset-block-start:calc(100% + 4px); margin:0; padding:4px; list-style:none; border:1px solid var(--line); border-radius:12px; background:var(--card); box-shadow:0 16px 48px rgba(0,0,0,.28); z-index:5; max-height:260px; overflow-y:auto; }
+  .dd-option { width:100%; min-height:44px; display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border:none; border-radius:8px; background:transparent; color:var(--text); cursor:pointer; font:inherit; text-align:start; }
+  .dd-option:hover, .dd-option[data-active="true"] { background: rgba(127,127,127,.14); }
+  .dd-option .body { flex:1; min-width:0; }
+  .dd-option .desc { display:block; font-size:12px; color:var(--muted); margin-block-start:2px; }
+  .dd-option .check { color: var(--accent); flex-shrink:0; }
+  textarea, input[type=email] { width:100%; border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; padding:10px 12px; font:inherit; }
+  textarea { min-height: 110px; resize: vertical; }
+  .row { margin-bottom: 14px; }
+  .hint { font-size:12px; color: var(--muted); }
+  .attach-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .attach-row .hint { flex:1; min-width:0; }
+  .stars { display:flex; align-items:center; }
+  .stars button { background:none; border:none; cursor:pointer; color:var(--line); padding:10px 2px; line-height:0; transition: transform .12s ease; }
+  .stars button.on { color:#f6b73c; }
+  .stars button:hover { transform: scale(1.15); }
+  .stars .word { font-size:12px; color:var(--muted); margin-inline-start:8px; }
+  .att-list { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .att { border:1px solid var(--line); border-radius:8px; padding:4px 10px; font-size:13px; display:flex; gap:8px; align-items:center; }
+  .att b { font-weight:500; max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .att button { border:none; background:none; cursor:pointer; color:var(--muted); }
+  .att.thumb { position:relative; padding:2px; width:72px; height:72px; align-items:center; justify-content:center; }
+  .att.thumb.err { border-color:#e05661; }
+  .att.thumb img { width:100%; height:100%; object-fit:cover; border-radius:6px; }
+  .att.thumb .rm { position:absolute; top:3px; right:3px; width:20px; height:20px; background:rgba(17,24,39,.72); background-clip:padding-box; border:12px solid transparent; box-sizing:content-box; margin:-12px; color:#fff; border-radius:999px; display:flex; align-items:center; justify-content:center; z-index:2; }
+  .att.thumb .retry { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; gap:4px; border:none; background:rgba(17,24,39,.55); color:#fff; font:inherit; font-size:11px; border-radius:6px; cursor:pointer; z-index:1; }
+  .att .retry-inline { border:none; background:none; color:var(--muted); font:inherit; font-size:12px; cursor:pointer; text-decoration:underline; padding:0; }
+  .att.thumb .st { position:absolute; bottom:3px; left:3px; font-size:11px; color:#fff; background:rgba(17,24,39,.72); border-radius:6px; padding:0 6px; }
+  .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:8px; }
+  .btn { border:none; border-radius:10px; padding:10px 18px; cursor:pointer; font:inherit; }
+  .btn.primary { background:var(--accent); color:#fff; } .btn.primary:disabled { opacity:.5; cursor:default; }
+  .btn.ghost { background:transparent; color:var(--muted); }
+  .status { min-height:20px; font-size:13px; margin-top:10px; }
+  .status.err { color:#e05661; } .status.ok { color:#3fa96c; }
+  .success { text-align:center; padding: 40px 24px; }
+  .success .tick { font-size: 44px; }
+  code { background: rgba(127,127,127,.12); border-radius:6px; padding:1px 6px; }
+  .lucide { display:inline-block; vertical-align:-0.125em; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Acme Checkout (sample host app)</h1>
+  <p class="muted">This page hosts the embedded Pinpost Web SDK. The floating button in the corner is injected by the SDK; submissions go through
+  <code>POST /v1/feedback</code>, and attachments are uploaded directly via a signed URL from <code>POST /v1/attachment-uploads</code>. Duplicate clicks are deduped by an idempotency key.</p>
+  <p>Pretend this is your product page — cart, checkout button and so on.</p>
+</div>
+
+<button class="fab" id="fab"><span style="display:inline-flex;align-items:center;gap:8px"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide" aria-hidden="true" focusable="false"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/></svg>Feedback</span></button>
+
+<dialog id="dlg">
+  <form class="panel" id="form" method="dialog">
+    <h2>Send us feedback</h2>
+    <div class="types" id="types"></div>
+    <div class="row"><textarea id="message" placeholder="Paste a screenshot (Ctrl+V) and tell us what happened…" aria-label="Feedback message" required></textarea></div>
+    <div class="row"><input type="email" id="email" placeholder="Email (optional, so we can reply)" aria-label="Contact email"></div>
+    <div class="row stars" id="stars" aria-label="Satisfaction rating"></div>
+    <div class="row">
+      <input type="file" id="file" accept="image/jpeg,image/png,image/webp,text/plain" multiple hidden>
+      <div class="attach-row">
+      <button type="button" class="btn ghost" id="attachBtn"><span style="display:inline-flex;align-items:center;gap:8px"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide" aria-hidden="true" focusable="false"><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg>Add file</span></button>
+      <span class="hint" id="pasteHint">Paste (Ctrl+V) or drop a screenshot — no file picker needed</span>
+      </div>
+      <div class="att-list" id="attList"></div>
+    </div>
+    <div class="status" id="status" role="status"></div>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="cancel">Cancel</button>
+      <button type="button" class="btn primary" id="submit">Submit feedback</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+// ---- Mini Pinpost Web SDK (inline core protocol) ----
+const Pinpost = {
+  writeKey: 'wk_demo_5f8a2c91d4e7b3a6f0c1',
+  apiUrl: '',
+  config: null,
+  idempotencyKey: null,
+  attachments: [], // {id, name, file, url, status}
+
+  async init() {
+    try {
+      const res = await fetch(this.apiUrl + '/v1/sdk/config', { headers: this.headers() });
+      if (res.ok) this.config = (await res.json()).settings;
+    } catch (_) { /* fall back to safe defaults when config is unavailable */ }
+    this.config ||= { types: [{key:'bug',label:'Bug',enabled:true},{key:'suggestion',label:'Suggestion',enabled:true},{key:'other',label:'Other',enabled:true}], allow_rating: true };
+  },
+  headers(extra) { return Object.assign({ 'X-Pinpost-Write-Key': this.writeKey, 'Content-Type': 'application/json' }, extra); },
+  newIdempotencyKey() { this.idempotencyKey = crypto.randomUUID(); },
+
+  context() {
+    return {
+      platform: 'web', sdk_version: '0.1.0', app_version: '1.0.0-demo',
+      locale: navigator.language, screen_name: 'checkout',
+      os_version: navigator.platform, screen: `${screen.width}x${screen.height}`,
+      network: navigator.onLine ? 'online' : 'offline',
+    };
+  },
+
+  async uploadAttachment(file, body) {
+    const bytes = body || file;
+    const meta = { original_name: file.name, mime_type: file.type, size: bytes.size };
+    const res = await fetch(this.apiUrl + '/v1/attachment-uploads', { method:'POST', headers:this.headers(), body: JSON.stringify(meta) });
+    if (!res.ok) throw new Error((await res.json()).error?.message || 'upload authorization failed');
+    const { attachment_id, upload_url } = await res.json();
+    const put = await fetch(upload_url, { method:'PUT', body: bytes });
+    if (!put.ok) throw new Error('upload failed');
+    return attachment_id;
+  },
+
+  // In-session retry: network errors / 429 / 5xx retry with the same idempotency key and exponential backoff
+  async submit(payload, onRetry) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let res;
+      try {
+        res = await fetch(this.apiUrl + '/v1/feedback', {
+          method: 'POST',
+          headers: this.headers({ 'Idempotency-Key': this.idempotencyKey }),
+          body: JSON.stringify(payload),
+        });
+      } catch (e) { res = null; }
+      if (res && res.status < 500 && res.status !== 429) {
+        const body = await res.json();
+        if (!res.ok) throw Object.assign(new Error(body.error?.message || 'failed'), { fields: body.error?.fields });
+        return body;
+      }
+      const retryAfter = res?.headers.get('Retry-After');
+      const delay = retryAfter ? retryAfter * 1000 : (500 * 2 ** attempt + Math.random() * 300);
+      onRetry?.(attempt + 1);
+      await new Promise(r => setTimeout(r, delay));
+    }
+    throw new Error('Network error, please try again later');
+  },
+};
+
+// ---- Widget UI ----
+const $ = id => document.getElementById(id);
+let selectedType = 'bug', rating = 0;
+
+// Type picker: a listbox, not a row of pills. The enabled types come from
+// project settings, so this has to stay legible when a project configures more
+// than the three defaults, and the descriptions give each option context a
+// bare pill label cannot. Mirrors TypeSelect in @pinpost/react.
+const TYPE_ICONS = {
+  bug: '<path d="M12 20v-9"/><path d="M14 7a4 4 0 0 1 4 4v3a6 6 0 0 1-12 0v-3a4 4 0 0 1 4-4z"/><path d="M14.12 3.88 16 2"/><path d="M21 21a4 4 0 0 0-3.81-4"/><path d="M21 5a4 4 0 0 1-3.55 3.97"/><path d="M22 13h-4"/><path d="M3 21a4 4 0 0 1 3.81-4"/><path d="M3 5a4 4 0 0 0 3.55 3.97"/><path d="M6 13H2"/><path d="m8 2 1.88 1.88"/><path d="M9 7.13V6a3 3 0 1 1 6 0v1.13"/>',
+  suggestion: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
+  other: '<path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/>',
+};
+const TYPE_DESCRIPTIONS = {
+  bug: 'Something is broken',
+  suggestion: 'An idea for us',
+  other: 'Anything else',
+};
+const typeIcon = key => TYPE_ICONS[key] || TYPE_ICONS.other;
+
+let typeOpen = false, typeActive = 0;
+
+function enabledTypes() {
+  return Pinpost.config.types.filter(t => t.enabled);
+}
+
+function renderTypes() {
+  const host = $('types');
+  const types = enabledTypes();
+  const current = types.find(t => t.key === selectedType) || types[0];
+  host.innerHTML = '';
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'dd-trigger';
+  trigger.id = 'typeTrigger';
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-expanded', String(typeOpen));
+  trigger.setAttribute('aria-label', 'Feedback type');
+  trigger.appendChild(lucideSvg(typeIcon(current.key), 16));
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = current.label;
+  trigger.appendChild(label);
+  const chev = lucideSvg('<path d="m6 9 6 6 6-6"/>', 16);
+  chev.classList.add('chev');
+  trigger.appendChild(chev);
+  trigger.onclick = () => {
+    typeOpen = !typeOpen;
+    typeActive = types.findIndex(t => t.key === selectedType);
+    renderTypes();
+    if (typeOpen) host.querySelector('[data-active="true"]')?.focus();
+  };
+  trigger.onkeydown = e => {
+    if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(e.key)) {
+      e.preventDefault();
+      typeOpen = true;
+      typeActive = e.key === 'ArrowUp' ? types.length - 1 : types.findIndex(t => t.key === selectedType);
+      renderTypes();
+      host.querySelector('[data-active="true"]')?.focus();
+    }
+  };
+  host.appendChild(trigger);
+
+  if (!typeOpen) return;
+
+  const list = document.createElement('ul');
+  list.className = 'dd-list';
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', 'Feedback type');
+  types.forEach((t, i) => {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'presentation');
+    const opt = document.createElement('button');
+    opt.type = 'button';
+    opt.className = 'dd-option';
+    opt.setAttribute('role', 'option');
+    opt.setAttribute('aria-selected', String(t.key === selectedType));
+    opt.dataset.active = String(i === typeActive);
+    opt.tabIndex = i === typeActive ? 0 : -1;
+    opt.appendChild(lucideSvg(typeIcon(t.key), 16));
+    const body = document.createElement('span');
+    body.className = 'body';
+    body.textContent = t.label;
+    const desc = document.createElement('span');
+    desc.className = 'desc';
+    desc.textContent = TYPE_DESCRIPTIONS[t.key] || '';
+    body.appendChild(desc);
+    opt.appendChild(body);
+    if (t.key === selectedType) {
+      const check = document.createElement('span');
+      check.className = 'check';
+      check.appendChild(lucideSvg('<path d="M20 6 9 17l-5-5"/>', 16));
+      opt.appendChild(check);
+    }
+    opt.onmouseenter = () => { typeActive = i; list.querySelectorAll('.dd-option').forEach((el, j) => { el.dataset.active = String(j === i); }); };
+    opt.onclick = () => { selectedType = t.key; typeOpen = false; renderTypes(); $('typeTrigger').focus(); };
+    li.appendChild(opt);
+    list.appendChild(li);
+  });
+  list.onkeydown = e => {
+    const last = types.length - 1;
+    if (e.key === 'Escape' || e.key === 'Tab') {
+      typeOpen = false; renderTypes();
+      if (e.key === 'Escape') $('typeTrigger').focus();
+      return;
+    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); typeActive = typeActive >= last ? 0 : typeActive + 1; }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); typeActive = typeActive <= 0 ? last : typeActive - 1; }
+    else if (e.key === 'Home') { e.preventDefault(); typeActive = 0; }
+    else if (e.key === 'End') { e.preventDefault(); typeActive = last; }
+    else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      selectedType = types[typeActive].key; typeOpen = false; renderTypes(); $('typeTrigger').focus();
+      return;
+    } else return;
+    renderTypes();
+    $('types').querySelector('[data-active="true"]')?.focus();
+  };
+  host.appendChild(list);
+}
+
+document.addEventListener('mousedown', e => {
+  if (typeOpen && !$('types').contains(e.target)) { typeOpen = false; renderTypes(); }
+});
+
+function lucideSvg(inner, size, opts) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svg.setAttribute('width', size); svg.setAttribute('height', size);
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', (opts && opts.fill) || 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', (opts && opts.strokeWidth) || '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('class', 'lucide');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  svg.innerHTML = inner;
+  return svg;
+}
+const RATING_WORDS = { 1: 'Terrible', 2: 'Poor', 3: 'OK', 4: 'Good', 5: 'Great' };
+let hoverRating = 0;
+
+function renderStars() {
+  const host = $('stars');
+  host.innerHTML = '';
+  // Show what clicking right now would set: the hovered/focused value when
+  // there is one, otherwise the value already held.
+  const shown = hoverRating || rating;
+  for (let i = 1; i <= 5; i++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = i <= shown ? 'on' : '';
+    b.appendChild(lucideSvg('<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>', 20, { fill: i <= shown ? 'currentColor' : 'none' }));
+    b.setAttribute('aria-label', `${i} star${i>1?'s':''}`);
+    b.setAttribute('aria-pressed', String(rating === i));
+    b.onmouseenter = () => { hoverRating = i; renderStars(); };
+    b.onfocus = () => { hoverRating = i; renderStars(); };
+    b.onblur = () => { hoverRating = 0; renderStars(); };
+    b.onclick = () => { rating = rating === i ? 0 : i; renderStars(); };
+    host.appendChild(b);
+  }
+  if (shown > 0) {
+    const word = document.createElement('span');
+    word.className = 'word';
+    word.textContent = RATING_WORDS[shown];
+    host.appendChild(word);
+  }
+}
+$('stars').addEventListener('mouseleave', () => { hoverRating = 0; renderStars(); });
+
+// Mirror of the acceptance rule in sdk/packages/core/src/index.ts
+// (selectAttachableFiles). This page is deliberately build-free — no bundler,
+// no import map — so it cannot import @pinpost/core and keeps a hand copy.
+// Keep these four constants and the branch structure below in step with core;
+// the wording lives in STRINGS the same way the React widget's locale pack does.
+const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'text/plain'];
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+
+const PASTE_KEY = /mac|iphone|ipad|ipod/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') ? '\u2318V' : 'Ctrl+V';
+const STRINGS = {
+  messagePlaceholder: k => `Paste a screenshot (${k}) and tell us what happened\u2026`,
+  attachHint: k => `Paste (${k}) or drop a screenshot \u2014 no file picker needed`,
+  attachmentCap: max => `At most ${max} attachments allowed.`,
+  attachmentsKeptFirst: (kept, max) => `Only ${max} attachments allowed \u2014 kept the first ${kept}.`,
+  attachmentsRejected: (count, maxMiB) => `${count} rejected \u2014 unsupported type, empty or over ${maxMiB} MiB.`,
+  uploadFailed: reason => `Attachment upload failed: ${reason}`,
+  uploadTooLarge: maxMiB => `Image is still over ${maxMiB} MiB after processing \u2014 attach a smaller one.`,
+  attachmentsUploading: 'Attachments are still uploading',
+  attachmentsFailed: 'One or more attachments failed \u2014 remove or retry them',
+};
+
+function removeAttachment(a) {
+  const idx = Pinpost.attachments.indexOf(a);
+  if (idx >= 0) Pinpost.attachments.splice(idx, 1);
+  if (a.url) URL.revokeObjectURL(a.url);
+  renderAtts();
+}
+
+// EXIF and every other ancillary chunk is dropped by re-encoding through a
+// canvas, matching uploadBytes() in @pinpost/react. Non-image types pass
+// through; a failure surfaces as an upload error rather than silently
+// uploading the original bytes.
+const REENCODABLE = new Set(['image/jpeg', 'image/png', 'image/webp']);
+async function encodeBitmap(bitmap, type, scale) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('canvas 2d context unavailable');
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, type));
+  if (!blob) throw new Error('could not re-encode the image');
+  return blob;
+}
+async function uploadBlob(file) {
+  if (!REENCODABLE.has(file.type)) return file;
+  const bitmap = await createImageBitmap(file);
+  try {
+    // Re-encoding can grow a file, and addFiles validated the original size —
+    // so shrink towards the cap rather than letting the server reject a file
+    // the widget already accepted and thumbnailed.
+    let scale = 1;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const blob = await encodeBitmap(bitmap, file.type, scale);
+      if (blob.size <= MAX_ATTACHMENT_SIZE) return blob;
+      scale *= Math.min(0.9, Math.sqrt(MAX_ATTACHMENT_SIZE / blob.size));
+    }
+    throw new Error(STRINGS.uploadTooLarge(MAX_ATTACHMENT_SIZE / 1048576));
+  } finally { bitmap.close(); }
+}
+
+async function uploadEntry(a) {
+  if (!Pinpost.attachments.includes(a)) return; // removed while a retry was pending
+  a.status = 'uploading';
+  renderAtts();
+  try {
+    a.id = await Pinpost.uploadAttachment(a.file, await uploadBlob(a.file));
+    a.status = 'done';
+    // Clear the failure text a previous attempt left behind, but only once
+    // nothing is still failing.
+    if (!Pinpost.attachments.some(x => x.status === 'error')) setStatus('');
+  } catch (e) {
+    a.status = 'error';
+    setStatus(STRINGS.uploadFailed(e.message), 'err');
+  }
+  renderAtts();
+}
+
+function addFiles(fileList) {
+  const list = Array.from(fileList || []);
+  // room is captured once, before anything is pushed: deriving it from the
+  // live list inside the loop reports a cap that never truncated anything.
+  const room = Math.max(MAX_ATTACHMENTS - Pinpost.attachments.length, 0);
+  const valid = list.filter(f => ALLOWED_TYPES.includes(f.type) && f.size >= 1 && f.size <= MAX_ATTACHMENT_SIZE);
+  const accepted = valid.slice(0, room);
+  const rejected = { invalid: list.length - valid.length, overCap: valid.length - accepted.length, atCap: room <= 0 };
+
+  for (const file of accepted) {
+    const entry = {
+      id: null,
+      name: file.name,
+      file,
+      url: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+      status: 'uploading',
+    };
+    Pinpost.attachments.push(entry);
+    uploadEntry(entry);
+  }
+
+  const notes = [];
+  if (!accepted.length && rejected.atCap) notes.push(STRINGS.attachmentCap(MAX_ATTACHMENTS));
+  else if (rejected.overCap > 0) notes.push(STRINGS.attachmentsKeptFirst(accepted.length, MAX_ATTACHMENTS));
+  if (rejected.invalid > 0) notes.push(STRINGS.attachmentsRejected(rejected.invalid, MAX_ATTACHMENT_SIZE / 1048576));
+  if (notes.length) setStatus(notes.join(' '), 'err');
+  else if (!Pinpost.attachments.some(a => a.status === 'error')) setStatus('');
+  renderAtts();
+}
+
+function renderAtts() {
+  const list = $('attList');
+  list.innerHTML = '';
+  Pinpost.attachments.forEach((a) => {
+    if (a.url) {
+      const el = document.createElement('span');
+      el.className = 'att thumb' + (a.status === 'error' ? ' err' : '');
+      el.innerHTML = '<img><button class="rm" type="button" title="Remove" aria-label="Remove attachment"></button>';
+      el.querySelector('img').src = a.url;
+      el.querySelector('img').alt = a.name;
+      el.querySelector('.rm').appendChild(lucideSvg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>', 12));
+      el.querySelector('.rm').onclick = (e) => { e.stopPropagation(); removeAttachment(a); };
+      if (a.status === 'uploading') {
+        const ov = document.createElement('span');
+        ov.className = 'st'; ov.textContent = 'Uploading…';
+        el.appendChild(ov);
+      } else if (a.status === 'error') {
+        // A real button, not a click handler on the wrapper span: retry is the
+        // failure path this flow added and it has to be keyboard-reachable.
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'retry';
+        retry.title = 'Retry upload'; retry.setAttribute('aria-label', 'Retry upload');
+        retry.appendChild(lucideSvg('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>', 12));
+        retry.append('Retry');
+        retry.onclick = () => uploadEntry(a);
+        el.appendChild(retry);
+      }
+      list.appendChild(el);
+    } else {
+      const el = document.createElement('span');
+      el.className = 'att';
+      el.innerHTML = '<b></b>';
+      el.querySelector('b').textContent = a.name;
+      el.title = a.name;
+      if (a.status === 'uploading') {
+        const st = document.createElement('i');
+        st.textContent = 'Uploading…';
+        el.appendChild(st);
+      } else if (a.status === 'error') {
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'retry-inline';
+        retry.title = 'Retry upload'; retry.setAttribute('aria-label', 'Retry upload');
+        retry.textContent = 'Failed — retry';
+        retry.onclick = () => uploadEntry(a);
+        el.appendChild(retry);
+      } else {
+        const st = document.createElement('i');
+        st.appendChild(lucideSvg('<path d="M20 6 9 17l-5-5"/>', 16));
+        el.appendChild(st);
+      }
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.appendChild(lucideSvg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>', 13));
+      del.setAttribute('aria-label', 'Remove attachment');
+      del.onclick = (e) => { e.stopPropagation(); removeAttachment(a); };
+      el.appendChild(del);
+      list.appendChild(el);
+    }
+  });
+}
+
+function setStatus(msg, cls) { const s = $('status'); s.textContent = msg || ''; s.className = 'status ' + (cls || ''); }
+
+$('fab').onclick = () => {
+  Pinpost.newIdempotencyKey(); // each panel open starts a fresh submission
+  $('dlg').showModal(); $('message').focus();
+};
+$('cancel').onclick = () => $('dlg').close();
+
+// A native <dialog> closes itself on Escape. While the type menu is open that
+// key belongs to the menu, otherwise one Escape throws away the whole draft.
+$('dlg').addEventListener('cancel', e => {
+  if (!typeOpen) return;
+  e.preventDefault();
+  typeOpen = false;
+  renderTypes();
+  $('typeTrigger').focus();
+});
+
+// Paste a screenshot straight into the panel — no file picker.
+$('dlg').addEventListener('paste', (e) => {
+  const files = Array.from(e.clipboardData.items)
+    .filter(it => it.kind === 'file')
+    .map(it => it.getAsFile())
+    .filter(f => f);
+  if (!files.length) return; // plain-text paste keeps its default behaviour
+  e.preventDefault();
+  addFiles(files);
+});
+
+// Drag & drop an image onto the panel.
+$('dlg').addEventListener('dragover', (e) => {
+  if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+});
+$('dlg').addEventListener('drop', (e) => {
+  if (!e.dataTransfer.files.length) return; // text and cross-tab URL drops keep their default
+  e.preventDefault();
+  addFiles(e.dataTransfer.files);
+});
+
+$('attachBtn').onclick = () => $('file').click();
+$('file').onchange = () => {
+  addFiles($('file').files);
+  $('file').value = '';
+};
+
+$('submit').onclick = async () => {
+  const message = $('message').value.trim();
+  if (!message) { setStatus('Please enter your feedback', 'err'); return; }
+  if (Pinpost.attachments.some(a => a.status === 'uploading')) { setStatus(STRINGS.attachmentsUploading, 'err'); return; }
+  if (Pinpost.attachments.some(a => a.status === 'error')) { setStatus(STRINGS.attachmentsFailed, 'err'); return; }
+  $('submit').disabled = true; setStatus('Submitting…');
+  const payload = {
+    type: selectedType, message,
+    rating: rating || null,
+    contact: { email: $('email').value.trim() },
+    context: Pinpost.context(),
+    attachment_ids: Pinpost.attachments.map(a => a.id),
+  };
+  try {
+    await Pinpost.submit(payload, n => setStatus(`Network hiccup, retrying (attempt ${n})…`));
+    $('form').innerHTML = `<div class="success"><div class="tick"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="lucide" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="m16 9-5.5 5.5L8 12"/></svg></div><h2>Thanks for your feedback!</h2><p class="muted">We received it and the team will follow up soon.</p><button type="button" class="btn primary" onclick="location.reload()">Done</button></div>`;
+  } catch (e) {
+    const fieldMsg = e.fields ? Object.entries(e.fields).map(([k,v]) => `${k}: ${v}`).join('; ') : '';
+    setStatus('Submit failed: ' + (fieldMsg || e.message), 'err');
+    $('submit').disabled = false;
+  }
+};
+
+// The markup already carries the Ctrl+V wording as a static fallback, so the
+// affordance survives an early throw or a CSP that blocks this inline script;
+// this only upgrades it to the platform-correct key.
+$('message').placeholder = STRINGS.messagePlaceholder(PASTE_KEY);
+$('pasteHint').textContent = STRINGS.attachHint(PASTE_KEY);
+
+Pinpost.init().then(renderTypes);
+renderStars();
+</script>
+</body>
+</html>

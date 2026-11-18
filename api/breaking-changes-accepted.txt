@@ -1,0 +1,23 @@
+# Breaking API changes the team has explicitly accepted.
+#
+# The `openapi-breaking` CI job passes this to oasdiff as --err-ignore. Each
+# line suppresses exactly one change on one operation: any other breaking
+# change — including removing a different path — still fails the build.
+#
+# Adding a line here is a decision about the published contract, not a CI
+# detail. Say who consumes the endpoint and why breaking it is unavoidable.
+# Lines starting with # are comments.
+
+# --- 2026-08: serverless migration (PR #8) ---
+# Attachment bytes moved to presigned S3 upload/download because Lambda's
+# synchronous payload ceiling (6 MB) is smaller than the attachment limit
+# (10 MiB), so neither direction can pass through the API any more.
+# `upload_url` is still returned by POST /v1/attachment-uploads, so the three
+# published SDKs keep working without a release.
+
+# Uploads now go straight to object storage; this route no longer exists.
+in API PUT /v1/uploads/{id} api path removed without deprecation
+
+# Downloads answer 302 to a 60-second presigned URL instead of the bytes.
+# Browsers follow it transparently; the admin console renders it as a link.
+in API GET /v1/attachments/{id}/download removed the success response with the status `200`

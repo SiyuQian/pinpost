@@ -1,0 +1,11 @@
+.DS_Store
+.agents/
+.claude/
+skills-lock.json
+var/
+node_modules/
+web/admin/dist/
+infrastructure/terraform/**/.terraform/
+infrastructure/terraform/dist/
+*.tfstate
+*.tfstate.*
