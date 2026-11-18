@@ -403,14 +403,15 @@ internal/
 
 ### 7.4 Dashboard API
 
-主要资源：
+后台路由按资源分组如下，完整列表以 `api/openapi.yaml` 为准：
 
-- `/v1/organizations`、`/projects`
-- `/v1/feedback`、`/feedback/{id}`、`/feedback/{id}/status`
-- `/v1/internal-feedback`
-- `/v1/feedback/{id}/assignee`、`/feedback/{id}/activities`
-- `/v1/members`
-- `/v1/analytics/overview`
+- 登录与会话（无需会话）：`GET /v1/auth/config`、`POST /v1/auth/login`、`POST /v1/auth/google`、`POST /v1/auth/logout`
+- 当前用户与初始化：`GET /v1/me`、`GET /v1/setup`
+- 组织与项目：`PATCH /v1/organization`、`GET /v1/projects`、`POST /v1/projects`、`PATCH /v1/projects/{id}`、`POST /v1/projects/{id}/write-key/rotate`
+- 反馈：`GET /v1/feedback`、`GET /v1/feedback/{id}`、`PATCH /v1/feedback/{id}`（状态、优先级、负责人、标签）、`POST /v1/feedback/{id}/notes`、`GET /v1/feedback/{id}/activities`、`GET /v1/attachments/{id}/download`
+- 内部反馈：`POST /v1/internal-feedback`
+- 成员与分析：`GET /v1/members`、`GET /v1/analytics/overview`
+- Webhook：`GET /v1/webhook-endpoints`、`POST /v1/webhook-endpoints`、`PATCH /v1/webhook-endpoints/{id}`、`DELETE /v1/webhook-endpoints/{id}`、`GET /v1/webhook-endpoints/{id}/deliveries`、`POST /v1/webhook-deliveries/{id}/replay`
 
 `POST /v1/internal-feedback` 让团队成员直接在后台建反馈——线下收集到的、内部
 自查发现的，都走这里。它复用 ingestion 的 `feedback.Create`（同一套校验、同一
