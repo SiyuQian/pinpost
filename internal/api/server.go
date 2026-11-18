@@ -64,7 +64,7 @@ func (s *Server) withProject(w http.ResponseWriter, r *http.Request, fn func(p *
 		if err != nil {
 			return err
 		}
-		if !s.IngestLimiter.Allow(r.Context(), p.ProjectID+"|"+platform.ClientIP(r)) {
+		if !s.IngestLimiter.Allow(p.ProjectID + "|" + platform.ClientIP(r)) {
 			w.Header().Set("Retry-After", "30")
 			return platform.Errf(429, "rate_limited", "Too many requests")
 		}

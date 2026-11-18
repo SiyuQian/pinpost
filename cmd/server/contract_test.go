@@ -1,8 +1,8 @@
 package main
 
-// Contract test: exercises the real HTTP API against a live DynamoDB Local and
+// Contract test: exercises the real HTTP API against a live Postgres and
 // RustFS, and validates every response against api/openapi.yaml. Skips when
-// DynamoDB is unreachable (set AWS_ENDPOINT_URL; defaults to docker compose).
+// either is unreachable — unless CI is set, where it fails (pgtest.Unavailable).
 
 import (
 	"bytes"
@@ -40,7 +40,6 @@ type contractClient struct {
 	doc    *openapi3.T
 	router routers.Router
 	http   *http.Client
-	store  *platform.Store
 	db     *pgxpool.Pool
 	srv    *api.Server
 	bucket string
@@ -51,29 +50,18 @@ type contractClient struct {
 	covered map[string]map[int]bool
 }
 
-// testBucket is created in RustFS on first use; DynamoDB Local and RustFS both
-// come from docker compose.
+// testBucket is created in RustFS on first use; Postgres and RustFS both come
+// from docker compose.
 const testBucket = "pinpost-test"
 
 func newContractClient(t *testing.T) *contractClient {
 	ctx := context.Background()
-	if os.Getenv("AWS_ENDPOINT_URL") == "" {
-		os.Setenv("AWS_ENDPOINT_URL", "http://localhost:8000")
-	}
 	os.Setenv("AWS_ACCESS_KEY_ID", env("AWS_ACCESS_KEY_ID", "pinpost"))
-	// The limiter now counts in DynamoDB, so its window outlives the process
-	// and is shared by every test: give the suite room and probe the limit
-	// itself on a throwaway tenant below.
-	os.Setenv("PINPOST_RATE_LIMIT", env("PINPOST_RATE_LIMIT", "100"))
 	os.Setenv("AWS_SECRET_ACCESS_KEY", env("AWS_SECRET_ACCESS_KEY", "pinpost-secret"))
 
 	cfg, err := platform.AWSConfig(ctx)
 	if err != nil {
 		t.Fatalf("aws config: %v", err)
-	}
-	store := platform.NewStore(cfg, env("PINPOST_TABLE", "pinpost-test"))
-	if err := platform.EnsureTable(ctx, store); err != nil {
-		pgtest.Unavailable(t, "dynamodb unreachable, skipping contract test: %v", err)
 	}
 	db := pgtest.New(t)
 	if err := project.SeedDemo(ctx, db); err != nil {
@@ -102,7 +90,7 @@ func newContractClient(t *testing.T) *contractClient {
 		t.Fatalf("spec invalid: %v", err)
 	}
 
-	srv := newServer(store, db, s3c, testBucket)
+	srv := newServer(db, s3c, testBucket)
 	ts := httptest.NewServer(newMux(srv))
 	t.Cleanup(ts.Close)
 	doc.Servers = openapi3.Servers{{URL: ts.URL}}
@@ -117,7 +105,7 @@ func newContractClient(t *testing.T) *contractClient {
 			// The download endpoint answers 302 to a presigned URL; the test
 			// asserts on the redirect itself.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		store: store, db: db, srv: srv, bucket: testBucket, covered: map[string]map[int]bool{}}
+		db: db, srv: srv, bucket: testBucket, covered: map[string]map[int]bool{}}
 }
 
 func ptr[T any](v T) *T { return &v }

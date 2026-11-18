@@ -35,7 +35,7 @@ func env(key, fallback string) string {
 
 // newServer wires the domain slices behind the generated spec router.
 // Shared with the contract test, which also reaches into the slices directly.
-func newServer(store *platform.Store, db *pgxpool.Pool, s3c *s3.Client, bucket string) *api.Server {
+func newServer(db *pgxpool.Pool, s3c *s3.Client, bucket string) *api.Server {
 	att := &attachment.Service{DB: db, S3: s3c, Presign: s3.NewPresignClient(s3c), Bucket: bucket}
 	proj := &project.Service{DB: db}
 	return &api.Server{
@@ -44,7 +44,7 @@ func newServer(store *platform.Store, db *pgxpool.Pool, s3c *s3.Client, bucket s
 		Feedback:      &feedback.Service{DB: db, Attachment: att, Members: proj},
 		Attachment:    att,
 		Outbox:        &outbox.Service{DB: db},
-		IngestLimiter: platform.NewRateLimiter(store, ingestLimit()),
+		IngestLimiter: platform.NewRateLimiter(ingestLimit()),
 		Google:        googleConfig(),
 	}
 }
@@ -202,16 +202,6 @@ func main() {
 		slog.Error("aws config failed", "error", err)
 		os.Exit(1)
 	}
-	store := platform.NewStore(cfg, env("PINPOST_TABLE", "pinpost"))
-	// A custom endpoint means DynamoDB Local. The container is in-memory, so the table survives server
-	// restarts but not `docker compose down` — which is why seed.go pins the
-	// demo UUIDs instead of generating them.
-	if os.Getenv("AWS_ENDPOINT_URL") != "" {
-		if err := platform.EnsureTable(ctx, store); err != nil {
-			slog.Error("table setup failed", "error", err)
-			os.Exit(1)
-		}
-	}
 	db, err := platform.OpenDB(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		slog.Error("database connection failed; set DATABASE_URL", "error", err)
@@ -233,7 +223,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	server := newServer(store, db, s3c, bucket)
+	server := newServer(db, s3c, bucket)
 	mux := newMux(server)
 
 	// The browser SDK posts from customer origins; the admin console does not.
