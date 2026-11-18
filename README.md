@@ -4,9 +4,10 @@ An embeddable cross-platform feedback system. See the design doc at [docs/feedba
 
 This repository implements **Phase 1** end to end as one self-hostable
 container: a Go modular monolith on **PostgreSQL**, **direct-upload
-attachments** on any S3-compatible store, an admin dashboard, client SDKs
-(`@pinpost/core`, `@pinpost/react`, `@pinpost/react-native`) and attachment
-malware scanning with quarantine. `docker compose up` runs all of it.
+attachments** on any S3-compatible store, an admin dashboard and attachment
+malware scanning with quarantine. `docker compose up` runs the server and its
+dependencies. The [Pinpost client SDKs](https://github.com/SiyuQian/pinpost-sdk)
+are maintained separately.
 
 ## Quick start
 
@@ -76,10 +77,6 @@ internal/
   platform/          # shared kernel: Postgres pool + migrations/, S3 client, error envelope, rate limiter
 web/admin/           # admin console: Vite + React + TypeScript + Tailwind + shadcn/ui
 web/demo/            # embedded feedback widget example (inline mini SDK)
-sdk/                 # TypeScript SDK monorepo (npm workspaces)
-  packages/core/           # @pinpost/core — protocol client, zero runtime deps
-  packages/react/          # @pinpost/react — Provider, usePinpost(), <FeedbackWidget/>
-  packages/react-native/   # @pinpost/react-native — same API, RN Modal widget
 ```
 
 ## Admin console
@@ -133,13 +130,10 @@ offer moves the API would reject.
 
 ## Client SDKs
 
-`sdk/` holds the three packages from design §6. `@pinpost/core` owns validation, identity/context merging (with the privacy key blacklist), attachment upload, and idempotent submit with backoff retry; the React and React Native packages are thin UI layers over it.
-
-```bash
-cd sdk && npm install && npm test   # builds all packages, runs unit + smoke tests
-```
-
-With the server running, the core test suite also executes a live end-to-end check (presigned upload → scan → submit → verify via the dashboard API); it skips automatically when the server is down. Point it elsewhere with `PINPOST_API_URL`.
+The MIT-licensed [Pinpost SDK repository](https://github.com/SiyuQian/pinpost-sdk)
+contains the client packages `@pinpost/core`, `@pinpost/react` and
+`@pinpost/react-native`. See that repository for setup, development and release
+instructions. The server API is defined in [`api/openapi.yaml`](api/openapi.yaml).
 
 ## Webhooks
 
@@ -260,10 +254,10 @@ The earlier serverless stack (Lambda + DynamoDB, Terraform) is preserved at the
 
 Pinpost is © DE TECHNOLOGY LIMITED.
 
-- The server, admin console and everything outside `sdk/` are licensed under the
+- This project is licensed under the
   [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
-- The client SDKs in [`sdk/`](sdk/) are licensed under the [MIT License](sdk/LICENSE),
-  so you can embed them in closed-source apps.
+- The [client SDKs](https://github.com/SiyuQian/pinpost-sdk) are licensed under the
+  [MIT License](https://github.com/SiyuQian/pinpost-sdk/blob/main/LICENSE).
 
 Contributions require signing the [Contributor License Agreement](CLA.md); see
 [CONTRIBUTING.md](CONTRIBUTING.md).

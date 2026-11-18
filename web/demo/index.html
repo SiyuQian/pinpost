@@ -333,8 +333,8 @@ function renderStars() {
 }
 $('stars').addEventListener('mouseleave', () => { hoverRating = 0; renderStars(); });
 
-// Mirror of the acceptance rule in sdk/packages/core/src/index.ts
-// (selectAttachableFiles). This page is deliberately build-free — no bundler,
+// Mirrors selectAttachableFiles in https://github.com/SiyuQian/pinpost-sdk.
+// This page is deliberately build-free — no bundler,
 // no import map — so it cannot import @pinpost/core and keeps a hand copy.
 // Keep these four constants and the branch structure below in step with core;
 // the wording lives in STRINGS the same way the React widget's locale pack does.

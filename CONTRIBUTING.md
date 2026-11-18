@@ -22,7 +22,6 @@ with Docker. Before you open a pull request, run the same checks as CI:
 docker compose up -d --wait postgres s3 && source ./local.env
 go vet ./... && go test ./... -count=1
 npm --prefix web/admin ci && npm --prefix web/admin run build && npm --prefix web/admin test
-npm --prefix sdk ci && npm --prefix sdk test
 ```
 
 If you change `api/openapi.yaml`, regenerate the server code with
@@ -39,5 +38,6 @@ something by id, add a cross-organization case to `cmd/server/authz_test.go`.
 
 ## Licensing of your contribution
 
-Code under `sdk/` is MIT-licensed; everything else is AGPL-3.0-only. Your
-contribution is licensed the same way as the directory it lands in.
+Contributions to this repository are licensed under [AGPL-3.0-only](LICENSE).
+For the MIT-licensed client libraries, contribute to
+[Pinpost SDK](https://github.com/SiyuQian/pinpost-sdk).
