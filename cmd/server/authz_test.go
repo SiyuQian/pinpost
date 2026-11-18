@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -69,6 +70,29 @@ func TestCrossTenantIsolation(t *testing.T) {
 	}
 	fbB := jsonField(t, bB, "feedback_id")
 
+	// Org A: one webhook endpoint with one terminal delivery (inserted directly,
+	// so no dispatcher runs and no HTTP request leaves the test).
+	c.do("POST", "/v1/auth/login", nil,
+		[]byte(fmt.Sprintf(`{"Email":%q,"Password":%q}`, project.DemoEmail, project.DemoPassword)))
+	s, body = c.do("POST", "/v1/webhook-endpoints", nil,
+		[]byte(`{"url":"https://example.com/hook","event_types":["feedback.created.v1"]}`))
+	if s != 201 {
+		t.Fatalf("org A webhook endpoint: %d %s", s, body)
+	}
+	epA := jsonField(t, body, "id")
+	delA := uuid.NewString()
+	t.Cleanup(func() { // the 10-endpoint cap would otherwise fill up on a persistent database
+		c.db.Exec(context.Background(), `DELETE FROM webhook_deliveries WHERE endpoint_id = $1::uuid`, epA)
+		c.db.Exec(context.Background(), `DELETE FROM webhook_endpoints WHERE id = $1::uuid`, epA)
+	})
+	if _, err := c.db.Exec(context.Background(), `INSERT INTO webhook_deliveries
+		(id, endpoint_id, organization_id, event_id, event_type, payload, status, attempt)
+		SELECT $1::uuid, $2::uuid, organization_id, $3::uuid, 'feedback.created.v1', '{}'::jsonb, 'succeeded', 1
+		FROM webhook_endpoints WHERE id = $2::uuid`, delA, epA, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	c.do("POST", "/v1/auth/logout", nil, nil)
+
 	// Org B dashboard session must see none of Org A's data.
 	if s, b := c.do("POST", "/v1/auth/login", nil,
 		[]byte(fmt.Sprintf(`{"Email":%q,"Password":%q}`, orgBEmail, orgBPassword))); s != 200 {
@@ -89,6 +113,10 @@ func TestCrossTenantIsolation(t *testing.T) {
 		{"POST", "/v1/feedback/" + fbA + "/notes", []byte(`{"Note":"intrusion"}`), 404},
 		{"GET", "/v1/feedback/" + fbA + "/activities", nil, 404},
 		{"GET", "/v1/attachments/" + attA + "/download", nil, 404},
+		{"PATCH", "/v1/webhook-endpoints/" + epA, []byte(`{"status":"paused"}`), 404},
+		{"DELETE", "/v1/webhook-endpoints/" + epA, nil, 404},
+		{"GET", "/v1/webhook-endpoints/" + epA + "/deliveries", nil, 404},
+		{"POST", "/v1/webhook-deliveries/" + delA + "/replay", nil, 404},
 	} {
 		if s, b := c.do(probe.method, probe.path, nil, probe.payload); s != probe.want {
 			t.Errorf("org B %s %s: want %d, got %d %s", probe.method, probe.path, probe.want, s, b)
@@ -97,6 +125,9 @@ func TestCrossTenantIsolation(t *testing.T) {
 	// Org B can still see its own feedback (the isolation is not just "deny all").
 	if s, _ := c.do("GET", "/v1/feedback/"+fbB, nil, nil); s != 200 {
 		t.Errorf("org B own feedback: want 200, got %d", s)
+	}
+	if s, b := c.do("GET", "/v1/webhook-endpoints", nil, nil); s != 200 || strings.Contains(string(b), epA) {
+		t.Errorf("org B webhook endpoint list: want 200 without org A's endpoint, got %d %s", s, b)
 	}
 	// Projects and members listings must be scoped to Org B.
 	if _, b := c.do("GET", "/v1/projects", nil, nil); strings.Contains(string(b), "Demo Project") {
@@ -119,5 +150,28 @@ func TestCrossTenantIsolation(t *testing.T) {
 	}
 	if s, _ := c.do("GET", "/v1/sdk/config", wkB, nil); s != 200 {
 		t.Errorf("org B write key after refused rotate: want 200, got %d", s)
+	}
+	// Org B's webhook probes changed nothing: endpoint still active, delivery still listed.
+	_, b := c.do("GET", "/v1/webhook-endpoints", nil, nil)
+	var eps struct {
+		Endpoints []struct{ ID, Status string } `json:"endpoints"`
+	}
+	if err := json.Unmarshal(b, &eps); err != nil {
+		t.Fatalf("org A endpoint list: %v %s", err, b)
+	}
+	found := false
+	for _, e := range eps.Endpoints {
+		if e.ID == epA {
+			found = true
+			if e.Status != "active" {
+				t.Errorf("org A endpoint status after org B probes: want active, got %q", e.Status)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("org A endpoint missing after org B probes: %s", b)
+	}
+	if _, b := c.do("GET", "/v1/webhook-endpoints/"+epA+"/deliveries", nil, nil); !strings.Contains(string(b), delA) {
+		t.Errorf("org A delivery missing after org B probes: %s", b)
 	}
 }
