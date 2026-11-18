@@ -341,7 +341,7 @@ func TestDeliverRecordsNonUTF8ResponseBody(t *testing.T) {
 	if !utf8.ValidString(d.ResponseBody) || strings.Contains(d.ResponseBody, "\x00") {
 		t.Fatalf("response_body not clean: %q", d.ResponseBody)
 	}
-	if !strings.HasPrefix(d.ResponseBody, strings.Repeat("a", 1022)) {
-		t.Fatalf("response_body content lost")
+	if want := strings.Repeat("a", 1022) + "\uFFFD"; d.ResponseBody != want {
+		t.Fatalf("response_body = %q, want %q", d.ResponseBody, want)
 	}
 }
