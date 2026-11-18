@@ -78,6 +78,7 @@ export const SCAN_LABEL: Record<ScanStatus, string> = {
   pending: "扫描中",
   clean: "已扫描",
   flagged: "已隔离",
+  rejected: "已拒绝",
 }
 
 export const STATUSES: FeedbackStatus[] = ["open", "in_progress", "resolved", "spam"]
@@ -119,6 +120,6 @@ export const DELIVERY_STATUS_LABEL: Record<WebhookDeliveryStatus, string> = {
 export const STATUS_TRANSITIONS: Record<FeedbackStatus, FeedbackStatus[]> = {
   open: ["in_progress", "resolved", "spam"],
   in_progress: ["open", "resolved", "spam"],
-  resolved: ["open", "in_progress"],
+  resolved: ["open"],
   spam: ["open"],
 }

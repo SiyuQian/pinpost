@@ -18,7 +18,7 @@ export type Role = "owner" | "admin" | "agent" | "viewer"
  * it is safe to render as provenance rather than as an editable label.
  */
 export type FeedbackSource = "widget" | "internal"
-export type ScanStatus = "pending" | "clean" | "flagged"
+export type ScanStatus = "pending" | "clean" | "flagged" | "rejected"
 
 export interface FeedbackListItem {
   id: string
