@@ -1,13 +1,29 @@
-// web/demo/index.html is a deliberately build-free static page: no bundler, no
-// React, so it cannot import lucide-react the way the admin app and this widget
-// do. Its icons are therefore hand-inlined Lucide geometry — which silently
-// goes stale when Lucide redraws a glyph, and silently drifts if someone hand-
-// draws a new one.
-//
-// This test is the guard. It lives in the sdk workspace because that is where
-// lucide-react and a CI-run test command already exist; it reaches out to the
-// demo file by path rather than owning it.
-import { test } from "node:test";
+/*
+ * MIT License
+ *
+ * Copyright (c) 2026 DE TECHNOLOGY LIMITED
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+// The build-free demo inlines SVG paths. Compare them with the Lucide version used by the admin app.
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -27,7 +43,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-const DEMO = fileURLToPath(new URL("../../../../web/demo/index.html", import.meta.url));
+const DEMO = fileURLToPath(new URL("../../../demo/index.html", import.meta.url));
 
 /** Every Lucide glyph the demo page is allowed to inline. */
 const ALLOWED: Record<string, LucideIcon> = {
@@ -103,11 +119,10 @@ test("every inline icon in the demo page matches the Lucide original", () => {
   );
 });
 
-test("the demo uses the same glyphs the React widget imports", () => {
+test("the demo renders every feedback control icon", () => {
   const html = readFileSync(DEMO, "utf8");
   const used = new Set(demoIcons(html).map((i) => official.get(i.geom)!));
-  // The widget's own icon set, which lucide-react now guarantees is current.
   for (const name of ["Bug", "Lightbulb", "MessageCircle", "ChevronDown", "Check", "Star", "X", "RotateCcw", "Paperclip"]) {
-    assert.ok(used.has(name), `the demo no longer renders ${name}; the two surfaces have diverged`);
+    assert.ok(used.has(name), `the demo no longer renders ${name}`);
   }
 });

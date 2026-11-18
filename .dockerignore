@@ -1,6 +1,5 @@
 .git
 **/node_modules
 web/admin/dist
-sdk
 docs
 infrastructure
