@@ -8,13 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 type ctxKey string
@@ -88,41 +84,35 @@ func Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// RateLimiter counts hits per key in a fixed one-minute window held in
-// DynamoDB, so every Lambda instance shares the same counter. The item expires
-// on its own via TTL. Errors fail open: this is abuse control, not a security
-// boundary, and a limiter outage must not take ingestion down with it.
+// RateLimiter counts hits per key in a fixed one-minute window, in memory.
+// It is abuse control, not a security boundary, so a restart forgetting the
+// counts is fine.
+//
+// ponytail: per process — N replicas behind a load balancer allow N× the
+// limit. Move the counter into Postgres if that ever matters.
 type RateLimiter struct {
-	Store *Store
 	Limit int
+
+	mu     sync.Mutex
+	window int64
+	hits   map[string]int
 }
 
-func NewRateLimiter(store *Store, limit int) *RateLimiter {
-	return &RateLimiter{Store: store, Limit: limit}
+func NewRateLimiter(limit int) *RateLimiter {
+	return &RateLimiter{Limit: limit}
 }
 
-func (rl *RateLimiter) Allow(ctx context.Context, key string) bool {
-	minute := time.Now().UTC().Format("200601021504")
-	res, err := rl.Store.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:        &rl.Store.Table,
-		Key:              KeyAV("RL#"+key+"#"+minute, Meta),
-		UpdateExpression: aws.String("ADD hits :one SET expires_at = :ttl"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":one": N("1"),
-			":ttl": N(strconv.FormatInt(TTL(2*time.Minute), 10)),
-		},
-		ReturnValues: types.ReturnValueUpdatedNew,
-	})
-	if err != nil {
-		slog.Error("rate limiter unavailable", "error", err)
-		return true
+func (rl *RateLimiter) Allow(key string) bool {
+	window := time.Now().Unix() / 60
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if window != rl.window {
+		// A new minute: the old counts are simply dropped, which is also
+		// what keeps the map from growing.
+		rl.window, rl.hits = window, map[string]int{}
 	}
-	n, ok := res.Attributes["hits"].(*types.AttributeValueMemberN)
-	if !ok {
-		return true
-	}
-	hits, _ := strconv.Atoi(n.Value)
-	return hits <= rl.Limit
+	rl.hits[key]++
+	return rl.hits[key] <= rl.Limit
 }
 
 // ClientIP reports the address to attribute a request to. Behind CloudFront
