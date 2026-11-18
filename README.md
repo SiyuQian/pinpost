@@ -18,11 +18,8 @@ source ./local.env                   # point the AWS SDK at those two containers
 PINPOST_SEED_DEMO=1 go run ./cmd/server   # API + static pages (localhost:8787)
 ```
 
-`cmd/server` is an ordinary HTTP server — the Lambda Web Adapter is what makes
-it run as a function, so local development needs no Lambda emulator and no
-`sam local`. The table and bucket are created on boot when the endpoints point
-at the local containers; a deployment declares them in
-[infrastructure/terraform/](infrastructure/terraform/) instead.
+`cmd/server` is an ordinary HTTP server. The table and bucket are created on
+boot when the endpoints point at the local containers.
 
 The Go server serves the admin console from `web/admin/dist`, so build it once
 before the first boot. If you skip the build, `/admin/` explains what to run
@@ -65,10 +62,7 @@ and data access; `cmd/server` only wires slices together.
 
 ```
 api/                 # openapi.yaml (source of truth) + codegen config
-infrastructure/      # build.sh + terraform/: one module, one root per environment
 cmd/server/          # API entry point: store, seed, wiring, static files
-cmd/scan/            # Lambda: verify + scan an object after it lands in S3
-cmd/webhook/         # Lambda: deliver webhooks from the table's change stream
 internal/
   api/               # generated router/models (gen.go) + ServerInterface impl delegating to slices
   auth/              # member sessions, roles, write keys
@@ -227,73 +221,10 @@ add the sparse `GSI2PK = ORG#<org>#STATUS#<s>` index.
 
 ## Deploying
 
-Pinpost deploys into **your own AWS account** with Terraform. With no traffic it
-costs close to nothing: no always-on instance, VPC, NAT gateway or load balancer.
-
-```
-infrastructure/
-  build.sh                 # compiles the three Go binaries into Lambda zips
-  terraform/
-    modules/pinpost/       # every resource: dynamodb.tf, s3.tf, lambda.tf, iam.tf, cloudfront.tf
-    example/               # an environment root — copy it once per environment
-```
-
-An environment root is a few small files — backend, provider, one `module` block
-and its inputs. Copy `example/` once per environment (say `staging/` and
-`production/`) so each keeps its own state: a plan or apply in one cannot read
-or touch the other. Set the state bucket in `backend.tf` first; the bucket is
-deliberately not managed by Terraform, so a `terraform destroy` cannot delete
-the state it is writing to. Create it once by hand:
-
-```bash
-aws s3api create-bucket --bucket <your-tfstate-bucket> --region us-east-1
-aws s3api put-bucket-versioning --bucket <your-tfstate-bucket> --versioning-configuration Status=Enabled
-```
-
-Terraform does not build the Go binaries, so `build.sh` runs first. One set of
-zips serves every environment — the binary does not vary, only its
-configuration does.
-
-```bash
-npm --prefix web/admin ci && npm --prefix web/admin run build
-./infrastructure/build.sh
-terraform -chdir=infrastructure/terraform/example init
-terraform -chdir=infrastructure/terraform/example apply -var 'seed_admin_email=you@example.com' -var 'seed_admin_password=...'
-aws s3 sync web/admin/dist "s3://$(terraform -chdir=infrastructure/terraform/example output -raw site_bucket)/admin/"
-aws s3 sync web/demo       "s3://$(terraform -chdir=infrastructure/terraform/example output -raw site_bucket)/demo/"
-```
-
-The root's variables: `region`, `stack_name`, `seed_admin_email` and
-`seed_admin_password` (first owner on an empty table only),
-`cors_allowed_origins`, `google_client_id`, `google_allowed_emails` (the
-dashboard's Google sign-in allowlist), and `domain_names` / `cloudflare_zone_id`
-for custom domains. The module also accepts `adapter_layer_arn` to pin a
-different Lambda Web Adapter version.
-
-### Custom domains
-
-Without `domain_names` everything is served from the distribution's
-`*.cloudfront.net` name. To use your own hostnames, list them admin console
-first, API second, and pass the Cloudflare zone that holds them:
-
-```bash
-export CLOUDFLARE_API_TOKEN=...          # Zone → DNS → Edit and Zone → Zone → Read
-export TF_VAR_cloudflare_zone_id=...
-```
-
-Both names resolve to the same distribution, so the admin console keeps calling
-`/v1` relative and its session cookie is unaffected; the API name exists for SDK
-consumers. Terraform creates the ACM certificate (in us-east-1), its validation
-CNAMEs and the site CNAMEs together, and it only ever touches those records —
-never the apex, a wildcard or any zone-level setting. Keep the records DNS-only
-(not proxied): CloudFront serves the certificate and matches on the SNI host.
-
-The module declares everything: the table (with TTL and the change stream),
-both buckets, the three functions and their IAM roles, the dead-letter queue,
-the CloudFront distribution and 7-day log retention. Two things are load-bearing
-for the bill: keep that retention short, and never put the API function in a
-VPC — a NAT gateway costs more per month than the entire rest of the stack.
-DynamoDB stays on-demand; provisioned capacity is more expensive at this size.
+Pinpost is moving from AWS Lambda + DynamoDB to a single container backed by
+PostgreSQL and any S3-compatible object store, started with `docker compose up`.
+Until that lands there is no supported deployment path. The serverless
+Terraform stack is preserved at the `aws-lambda-dynamodb` git tag.
 
 ## License
 
