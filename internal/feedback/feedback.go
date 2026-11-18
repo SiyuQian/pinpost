@@ -8,18 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/SiyuQian/pinpost/internal/attachment"
 	"github.com/SiyuQian/pinpost/internal/platform"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var validTypes = map[string]bool{"bug": true, "suggestion": true, "other": true}
@@ -49,18 +45,12 @@ var statusTransitions = map[string][]string{
 // contextBlacklist keys are dropped from custom context on both SDK and server.
 var contextBlacklist = map[string]bool{"password": true, "authorization": true, "cookie": true, "token": true, "secret": true}
 
-// idemTTL matches the design: replays are deduped for a day, then the key expires.
-const idemTTL = 24 * time.Hour
-
 type Service struct {
-	Store      *platform.Store
+	DB         *pgxpool.Pool
 	Attachment *attachment.Service
 	Members    interface {
 		IsMember(ctx context.Context, orgID, memberID string) (bool, error)
 	}
-
-	overviewMu    sync.Mutex
-	overviewCache map[string]cachedItems
 }
 
 type CreateInput struct {
@@ -116,11 +106,14 @@ func (s *Service) Validate(in *CreateInput) *platform.APIError {
 	if len(in.AttachmentIDs) > 5 {
 		fields["attachment_ids"] = "too many attachments"
 	} else {
-		// Two identical ids become two operations on one item, which
-		// TransactWriteItems rejects as a ValidationException — an input
-		// error that would otherwise surface as a 500.
+		// A duplicate would be claimed twice and fail as "already claimed";
+		// a non-UUID would reach the uuid column and surface as a 500.
 		seen := make(map[string]bool, len(in.AttachmentIDs))
 		for _, id := range in.AttachmentIDs {
+			if uuid.Validate(id) != nil {
+				fields["attachment_ids"] = "must be UUIDs"
+				break
+			}
 			if seen[id] {
 				fields["attachment_ids"] = "must be unique"
 				break
@@ -291,51 +284,18 @@ func strPtr(v string) *string {
 	return &v
 }
 
-// Create writes the feedback, its idempotency key, its first activity and the
-// attachment claims in one TransactWriteItems. A duplicate idempotency key
-// fails the whole transaction, and the existing record is returned instead.
+// Create writes the feedback, its first activity and the attachment claims in
+// one transaction. A replayed idempotency key inserts nothing and returns the
+// record created the first time; a concurrent request with the same key waits
+// on the unique index until the first commits, then takes the same path.
 func (s *Service) Create(ctx context.Context, in *CreateInput) (*Created, error) {
 	if apiErr := s.Validate(in); apiErr != nil {
 		return nil, apiErr
 	}
 	ctxJSON, _ := json.Marshal(sanitizeContext(in.Context))
-	id := uuid.Must(uuid.NewV7()).String()
-	now := time.Now().UTC()
-
 	source := in.Source
 	if source == "" {
 		source = SourceWidget
-	}
-	item := &Item{
-		Key:            itemKey(in.OrganizationID, id),
-		FeedbackID:     id,
-		OrganizationID: in.OrganizationID,
-		ProjectID:      in.ProjectID,
-		ExternalUserID: strPtr(in.ExternalUserID),
-		ContactEmail:   strPtr(in.Contact.Email),
-		Type:           in.Type,
-		Message:        strings.TrimSpace(in.Message),
-		Source:         source,
-		Rating:         in.Rating,
-		Status:         "open",
-		Priority:       "none",
-		Tags:           []string{},
-		Context:        string(ctxJSON),
-		IdempotencyKey: in.IdempotencyKey,
-		LastActorID:    in.ActorID,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	fbAV, err := platform.Marshal(item)
-	if err != nil {
-		return nil, err
-	}
-	idemK := idemKey(in.ProjectID, in.IdempotencyKey)
-	idemAV, err := platform.Marshal(&IdemItem{
-		Key: idemK, FeedbackID: id, CreatedAt: now, ExpiresAt: platform.TTL(idemTTL),
-	})
-	if err != nil {
-		return nil, err
 	}
 	// An internal report is attributed to the member who filed it, so the
 	// timeline reads "X created this" rather than crediting an end user.
@@ -343,86 +303,69 @@ func (s *Service) Create(ctx context.Context, in *CreateInput) (*Created, error)
 	if in.ActorID != "" {
 		actorType, actorID = "member", &in.ActorID
 	}
-	actAV, err := platform.Marshal(s.newActivity(item, actorType, actorID, "created", nil))
+
+	out := &Created{FeedbackID: uuid.Must(uuid.NewV7()).String()}
+	var invalidAttachment string
+	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `INSERT INTO feedback
+			(id, organization_id, project_id, idempotency_key, external_user_id, contact_email,
+			 type, message, source, rating, context)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			ON CONFLICT (project_id, idempotency_key) DO NOTHING
+			RETURNING created_at`,
+			out.FeedbackID, in.OrganizationID, in.ProjectID, in.IdempotencyKey,
+			strPtr(in.ExternalUserID), strPtr(in.Contact.Email), in.Type,
+			strings.TrimSpace(in.Message), source, in.Rating, string(ctxJSON)).Scan(&out.CreatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Idempotent replay: hand back the feedback created earlier.
+			return tx.QueryRow(ctx, `SELECT id, created_at FROM feedback
+				WHERE project_id = $1 AND idempotency_key = $2`, in.ProjectID, in.IdempotencyKey).
+				Scan(&out.FeedbackID, &out.CreatedAt)
+		}
+		if err != nil {
+			return err
+		}
+		if err := insertActivity(ctx, tx, out.FeedbackID, actorType, actorID, "created", nil); err != nil {
+			return err
+		}
+		for _, attID := range in.AttachmentIDs {
+			ok, err := attachment.Claim(ctx, tx, attID, in.ProjectID, out.FeedbackID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				invalidAttachment = attID
+				return errRollback
+			}
+		}
+		return nil
+	})
+	if invalidAttachment != "" {
+		return nil, platform.ValidationErr(map[string]string{
+			"attachment_ids": fmt.Sprintf(
+				"attachment %s is unknown, already claimed, or belongs to another project", invalidAttachment)})
+	}
 	if err != nil {
 		return nil, err
 	}
-
-	// Order matters: cancellation reasons come back positionally, and that is
-	// how a duplicate key is told apart from an unavailable attachment.
-	const idemIndex = 1
-	const firstAttachmentIndex = 3
-	writes := []types.TransactWriteItem{
-		{Put: &types.Put{TableName: &s.Store.Table, Item: fbAV}},
-		{Put: &types.Put{TableName: &s.Store.Table, Item: idemAV,
-			ConditionExpression: aws.String("attribute_not_exists(pk)")}},
-		{Put: &types.Put{TableName: &s.Store.Table, Item: actAV}},
-	}
-	for _, attID := range in.AttachmentIDs {
-		writes = append(writes, attachment.LinkTransactItem(s.Store, attID, in.ProjectID, id))
-	}
-
-	_, err = s.Store.DB.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: writes})
-	if err != nil {
-		var cancelled *types.TransactionCanceledException
-		if !errors.As(err, &cancelled) {
-			return nil, err
-		}
-		for i, reason := range cancelled.CancellationReasons {
-			if reason.Code == nil {
-				continue
-			}
-			if *reason.Code == "TransactionConflict" {
-				// Another writer touched one of these items mid-transaction —
-				// the scan Lambda recording a verdict on an attachment is the
-				// common one. Retriable, so say so instead of returning 500.
-				return nil, platform.Errf(409, "conflict", "Concurrent write, retry the request")
-			}
-			if *reason.Code != "ConditionalCheckFailed" {
-				continue
-			}
-			if i == idemIndex {
-				// Idempotent replay: hand back the feedback created earlier.
-				var existing IdemItem
-				found, err := s.Store.Get(ctx, idemK.PK, idemK.SK, &existing)
-				if err != nil {
-					return nil, err
-				}
-				if found {
-					return &Created{FeedbackID: existing.FeedbackID, CreatedAt: existing.CreatedAt}, nil
-				}
-				return nil, platform.Errf(409, "conflict", "Concurrent submission with the same idempotency key")
-			}
-			if i >= firstAttachmentIndex {
-				attID := in.AttachmentIDs[i-firstAttachmentIndex]
-				return nil, platform.ValidationErr(map[string]string{
-					"attachment_ids": fmt.Sprintf(
-						"attachment %s is unknown, already claimed, or belongs to another project", attID)})
-			}
-		}
-		return nil, err
-	}
-	return &Created{FeedbackID: id, CreatedAt: now}, nil
+	return out, nil
 }
 
-func (s *Service) newActivity(fb *Item, actorType string, actorID *string, activityType string, data map[string]any) *ActivityItem {
+// errRollback aborts a transaction whose outcome the caller has already
+// recorded elsewhere.
+var errRollback = errors.New("rollback")
+
+// insertActivity appends one entry to a feedback timeline.
+func insertActivity(ctx context.Context, tx pgx.Tx, feedbackID, actorType string, actorID *string,
+	activityType string, data map[string]any) error {
 	b, _ := json.Marshal(data)
 	if data == nil {
 		b = []byte("{}")
 	}
-	actID := uuid.Must(uuid.NewV7()).String()
-	return &ActivityItem{
-		Key:            platform.Key{PK: "FB#" + fb.FeedbackID, SK: "ACT#" + actID},
-		ActivityID:     actID,
-		FeedbackID:     fb.FeedbackID,
-		OrganizationID: fb.OrganizationID,
-		ProjectID:      fb.ProjectID,
-		ActorType:      actorType,
-		ActorID:        actorID,
-		ActivityType:   activityType,
-		Data:           string(b),
-		CreatedAt:      time.Now().UTC(),
-	}
+	_, err := tx.Exec(ctx, `INSERT INTO activities (id, feedback_id, actor_type, actor_id, activity_type, data)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		uuid.Must(uuid.NewV7()).String(), feedbackID, actorType, actorID, activityType, string(b))
+	return err
 }
 
 // ---- reads ----
@@ -445,8 +388,7 @@ type ListItem struct {
 	URL       *string `json:"url"`
 	UserAgent *string `json:"user_agent"`
 	// "widget" for a customer report, "internal" for one a member filed from
-	// the dashboard. Always populated: rows written before the field existed
-	// report as "widget".
+	// the dashboard.
 	Source     string    `json:"source"`
 	Rating     *int      `json:"rating"`
 	Status     string    `json:"status"`
@@ -491,12 +433,8 @@ func (i *Item) list() ListItem {
 		tags = []string{}
 	}
 	url, userAgent := i.source()
-	source := i.Source
-	if source == "" {
-		source = SourceWidget
-	}
 	return ListItem{ID: i.FeedbackID, Type: i.Type, Message: i.Message,
-		ContactEmail: i.ContactEmail, URL: url, UserAgent: userAgent, Source: source, Rating: i.Rating,
+		ContactEmail: i.ContactEmail, URL: url, UserAgent: userAgent, Source: i.Source, Rating: i.Rating,
 		Status: i.Status, Priority: i.Priority, AssigneeID: i.AssigneeID, Tags: tags,
 		ProjectID: i.ProjectID, CreatedAt: i.CreatedAt, UpdatedAt: i.UpdatedAt}
 }
@@ -513,123 +451,89 @@ type ListFilter struct {
 	Limit          int
 }
 
-// The cursor is the sort key of the last row returned; UUIDv7 sorts by time,
-// so a reverse Query resumes exactly where the previous page stopped.
-func encodeCursor(sk string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(sk))
+// The cursor is the id of the last row returned; UUIDv7 sorts by time, so
+// "id below the cursor, newest first" resumes exactly where the previous page
+// stopped.
+func encodeCursor(id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte("FB#" + id))
 }
 
 func decodeCursor(c string) (string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(c)
-	if err != nil || !strings.HasPrefix(string(raw), "FB#") {
+	id, ok := strings.CutPrefix(string(raw), "FB#")
+	if err != nil || !ok || uuid.Validate(id) != nil {
 		return "", fmt.Errorf("bad cursor")
 	}
-	return string(raw), nil
+	return id, nil
 }
 
-// List returns a tenant-scoped, cursor-paginated inbox page. Status/type/
-// assignee narrow the read with a FilterExpression and `q` is matched in
-// memory: both read the organization's partition, never the whole table.
+// likePattern matches q anywhere, with q's own wildcards taken literally.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// List returns a tenant-scoped, cursor-paginated inbox page. Every filter is a
+// WHERE clause on top of the organization; only (organization_id, id) is
+// indexed, so the cost of a narrow filter is bounded by one tenant's rows
+// (design §8.4 says when to index more).
 func (s *Service) List(ctx context.Context, f ListFilter) ([]ListItem, string, error) {
 	if f.Limit <= 0 || f.Limit > 100 {
 		f.Limit = 25
 	}
-	values := map[string]types.AttributeValue{
-		":pk":     platform.S("ORG#" + f.OrganizationID),
-		":prefix": platform.S("FB#"),
-	}
-	names := map[string]string{}
-	var filters []string
-	add := func(attr, placeholder, value string) {
-		names["#"+attr] = attr
-		values[placeholder] = platform.S(value)
-		filters = append(filters, fmt.Sprintf("#%s = %s", attr, placeholder))
+	args := []any{f.OrganizationID}
+	where := []string{"organization_id = $1"}
+	add := func(clause string, v any) {
+		args = append(args, v)
+		where = append(where, fmt.Sprintf(clause, len(args)))
 	}
 	if f.ProjectID != "" {
-		add("project_id", ":project", f.ProjectID)
+		add("project_id = $%d", f.ProjectID)
 	}
 	if f.Status != "" {
 		if !validStatus[f.Status] {
 			return nil, "", platform.ValidationErr(map[string]string{"status": "invalid"})
 		}
-		add("status", ":status", f.Status)
+		add("status = $%d", f.Status)
 	}
 	if f.Type != "" {
 		if !validTypes[f.Type] {
 			return nil, "", platform.ValidationErr(map[string]string{"type": "invalid"})
 		}
-		add("type", ":type", f.Type)
+		add("type = $%d", f.Type)
 	}
 	if f.Source != "" {
 		if !validSource[f.Source] {
 			return nil, "", platform.ValidationErr(map[string]string{"source": "invalid"})
 		}
-		names["#source"] = "source"
-		values[":source"] = platform.S(f.Source)
-		clause := "#source = :source"
-		if f.Source == SourceWidget {
-			// Rows written before the field existed carry no `source`
-			// attribute at all, and a bare equality would hide every one of
-			// them from the default "customer feedback" filter.
-			clause = "(attribute_not_exists(#source) OR #source = :source)"
-		}
-		filters = append(filters, clause)
+		add("source = $%d", f.Source)
 	}
 	if f.AssigneeID != "" {
-		add("assignee_id", ":assignee", f.AssigneeID)
+		add("assignee_id = $%d", f.AssigneeID)
 	}
-
-	in := &dynamodb.QueryInput{
-		TableName:                 &s.Store.Table,
-		KeyConditionExpression:    aws.String("pk = :pk AND begins_with(sk, :prefix)"),
-		ExpressionAttributeValues: values,
-		ScanIndexForward:          aws.Bool(false),
-	}
-	if len(filters) > 0 {
-		in.FilterExpression = aws.String(strings.Join(filters, " AND "))
-		in.ExpressionAttributeNames = names
-	} else if f.Query == "" {
-		// Nothing is dropped after the read, so the page size is exact.
-		in.Limit = aws.Int32(int32(f.Limit + 1))
+	if f.Query != "" {
+		add("message ILIKE $%d", "%"+likeEscaper.Replace(f.Query)+"%")
 	}
 	if f.Cursor != "" {
-		sk, err := decodeCursor(f.Cursor)
+		id, err := decodeCursor(f.Cursor)
 		if err != nil {
 			return nil, "", platform.ValidationErr(map[string]string{"cursor": "invalid"})
 		}
-		in.ExclusiveStartKey = platform.KeyAV("ORG#"+f.OrganizationID, sk)
+		add("id < $%d", id)
+	}
+	args = append(args, f.Limit+1)
+	rows, _ := s.DB.Query(ctx, `SELECT `+itemCols+` FROM feedback WHERE `+strings.Join(where, " AND ")+
+		fmt.Sprintf(` ORDER BY id DESC LIMIT $%d`, len(args)), args...)
+	page, err := pgx.CollectRows(rows, pgx.RowToStructByName[Item])
+	if err != nil {
+		return nil, "", err
 	}
 
-	needle := strings.ToLower(f.Query)
-	items := []ListItem{}
-	for len(items) <= f.Limit {
-		res, err := s.Store.DB.Query(ctx, in)
-		if err != nil {
-			return nil, "", err
-		}
-		var page []Item
-		if err := attributevalue.UnmarshalListOfMaps(res.Items, &page); err != nil {
-			return nil, "", err
-		}
-		for _, it := range page {
-			if needle != "" && !strings.Contains(strings.ToLower(it.Message), needle) {
-				continue
-			}
-			items = append(items, it.list())
-			if len(items) > f.Limit {
-				break
-			}
-		}
-		if len(res.LastEvaluatedKey) == 0 || len(items) > f.Limit {
-			break
-		}
-		in.ExclusiveStartKey = res.LastEvaluatedKey
+	items := make([]ListItem, 0, len(page))
+	for i := range page {
+		items = append(items, page[i].list())
 	}
-
 	next := ""
 	if len(items) > f.Limit {
 		items = items[:f.Limit]
-		next = encodeCursor("FB#" + items[len(items)-1].ID)
+		next = encodeCursor(items[len(items)-1].ID)
 	}
 	return items, next, nil
 }
@@ -641,16 +545,16 @@ type Detail struct {
 	Attachments    []attachment.Meta `json:"attachments"`
 }
 
-// get loads one record, scoped to the organization by its partition key.
+// get loads one record of this organization.
 func (s *Service) get(ctx context.Context, orgID, id string) (*Item, error) {
-	k := itemKey(orgID, id)
-	var it Item
-	found, err := s.Store.Get(ctx, k.PK, k.SK, &it)
+	rows, _ := s.DB.Query(ctx, `SELECT `+itemCols+` FROM feedback
+		WHERE organization_id = $1 AND id = $2`, orgID, id)
+	it, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[Item])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, platform.Errf(404, "not_found", "Feedback not found")
+	}
 	if err != nil {
 		return nil, err
-	}
-	if !found {
-		return nil, platform.Errf(404, "not_found", "Feedback not found")
 	}
 	return &it, nil
 }
@@ -660,7 +564,7 @@ func (s *Service) Get(ctx context.Context, orgID, id string) (*Detail, error) {
 	if err != nil {
 		return nil, err
 	}
-	atts, err := s.Attachment.ListForFeedback(ctx, id)
+	atts, err := s.Attachment.ListForFeedback(ctx, orgID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -680,9 +584,15 @@ type UpdateInput struct {
 	UpdatedAt  string   `json:"updated_at"` // optimistic concurrency token, optional
 }
 
+type activity struct {
+	typ  string
+	data map[string]any
+}
+
 // Update applies workflow changes, enforcing the state machine and recording
-// activity. The row lock is gone: the write is conditional on updated_at still
-// holding the value this call read, which is the same 409 to the dashboard.
+// activity. The write is conditional on updated_at still holding the value
+// this call read: a concurrent edit commits first, this UPDATE then matches no
+// row, and the dashboard gets 409.
 func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *UpdateInput) (*Detail, error) {
 	cur, err := s.get(ctx, orgID, id)
 	if err != nil {
@@ -695,23 +605,13 @@ func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *Upd
 		}
 	}
 
-	sets := []string{"updated_at = :now", "last_actor_id = :actor"}
-	names := map[string]string{}
-	now := time.Now().UTC()
-	nowAV, err := attributevalue.Marshal(now)
-	if err != nil {
-		return nil, err
+	args := []any{orgID, id, cur.UpdatedAt}
+	sets := []string{"updated_at = now()"}
+	set := func(col string, v any) {
+		args = append(args, v)
+		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
 	}
-	expectedAV, err := attributevalue.Marshal(cur.UpdatedAt)
-	if err != nil {
-		return nil, err
-	}
-	values := map[string]types.AttributeValue{
-		":now":      nowAV,
-		":actor":    platform.S(actorID),
-		":expected": expectedAV,
-	}
-	var activities []*ActivityItem
+	var activities []activity
 
 	if in.Status != nil && *in.Status != cur.Status {
 		if !validStatus[*in.Status] {
@@ -728,27 +628,21 @@ func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *Upd
 			return nil, platform.Errf(422, "invalid_transition",
 				fmt.Sprintf("Cannot move from %s to %s", cur.Status, *in.Status))
 		}
-		names["#status"] = "status"
-		sets = append(sets, "#status = :status")
-		values[":status"] = platform.S(*in.Status)
-		activities = append(activities, s.newActivity(cur, "member", &actorID, "status_changed",
-			map[string]any{"from": cur.Status, "to": *in.Status}))
+		set("status", *in.Status)
+		activities = append(activities, activity{"status_changed", map[string]any{"from": cur.Status, "to": *in.Status}})
 	}
 	if in.Priority != nil && *in.Priority != cur.Priority {
 		if !validPriority[*in.Priority] {
 			return nil, platform.ValidationErr(map[string]string{"priority": "invalid"})
 		}
-		sets = append(sets, "priority = :priority")
-		values[":priority"] = platform.S(*in.Priority)
-		activities = append(activities, s.newActivity(cur, "member", &actorID, "priority_changed",
-			map[string]any{"from": cur.Priority, "to": *in.Priority}))
+		set("priority", *in.Priority)
+		activities = append(activities, activity{"priority_changed", map[string]any{"from": cur.Priority, "to": *in.Priority}})
 	}
 	if in.AssigneeID != nil {
 		if *in.AssigneeID == "" {
-			sets = append(sets, "assignee_id = :assignee")
-			values[":assignee"] = &types.AttributeValueMemberNULL{Value: true}
+			set("assignee_id", nil)
 		} else {
-			// Assignee must be a member of the same organization.
+			// Assignee must be an active member of the same organization.
 			ok, err := s.Members.IsMember(ctx, orgID, *in.AssigneeID)
 			if err != nil {
 				return nil, err
@@ -756,52 +650,38 @@ func (s *Service) Update(ctx context.Context, orgID, id, actorID string, in *Upd
 			if !ok {
 				return nil, platform.ValidationErr(map[string]string{"assignee_id": "not a member of this organization"})
 			}
-			sets = append(sets, "assignee_id = :assignee")
-			values[":assignee"] = platform.S(*in.AssigneeID)
+			set("assignee_id", *in.AssigneeID)
 		}
-		activities = append(activities, s.newActivity(cur, "member", &actorID, "assigned",
-			map[string]any{"assignee_id": in.AssigneeID}))
+		activities = append(activities, activity{"assigned", map[string]any{"assignee_id": in.AssigneeID}})
 	}
 	if in.Tags != nil {
 		if len(in.Tags) > 20 {
 			return nil, platform.ValidationErr(map[string]string{"tags": "too many tags"})
 		}
-		tagsAV, err := attributevalue.Marshal(in.Tags)
-		if err != nil {
-			return nil, err
-		}
-		sets = append(sets, "tags = :tags")
-		values[":tags"] = tagsAV
-		activities = append(activities, s.newActivity(cur, "member", &actorID, "tags_changed",
-			map[string]any{"tags": in.Tags}))
+		set("tags", in.Tags)
+		activities = append(activities, activity{"tags_changed", map[string]any{"tags": in.Tags}})
 	}
 	if len(activities) == 0 {
 		return s.Get(ctx, orgID, id)
 	}
 
-	k := itemKey(orgID, id)
-	writes := []types.TransactWriteItem{{Update: &types.Update{
-		TableName:                 &s.Store.Table,
-		Key:                       platform.KeyAV(k.PK, k.SK),
-		UpdateExpression:          aws.String("SET " + strings.Join(sets, ", ")),
-		ConditionExpression:       aws.String("updated_at = :expected"),
-		ExpressionAttributeValues: values,
-	}}}
-	if len(names) > 0 {
-		writes[0].Update.ExpressionAttributeNames = names
-	}
-	for _, a := range activities {
-		av, err := platform.Marshal(a)
+	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE feedback SET `+strings.Join(sets, ", ")+`
+			WHERE organization_id = $1 AND id = $2 AND updated_at = $3`, args...)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		writes = append(writes, types.TransactWriteItem{Put: &types.Put{TableName: &s.Store.Table, Item: av}})
-	}
-	if _, err := s.Store.DB.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: writes}); err != nil {
-		var cancelled *types.TransactionCanceledException
-		if errors.As(err, &cancelled) {
-			return nil, platform.Errf(409, "conflict", "Feedback was modified by someone else")
+		if tag.RowsAffected() == 0 {
+			return platform.Errf(409, "conflict", "Feedback was modified by someone else")
 		}
+		for _, a := range activities {
+			if err := insertActivity(ctx, tx, id, "member", &actorID, a.typ, a.data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, orgID, id)
@@ -813,46 +693,34 @@ func (s *Service) AddNote(ctx context.Context, orgID, id, actorID, note string) 
 	if note == "" || len(note) > 5000 {
 		return platform.ValidationErr(map[string]string{"note": "required, max 5000 chars"})
 	}
-	cur, err := s.get(ctx, orgID, id)
-	if err != nil {
+	if _, err := s.get(ctx, orgID, id); err != nil {
 		return err
 	}
-	return s.Store.Put(ctx, s.newActivity(cur, "member", &actorID, "note_added",
-		map[string]any{"note": note}))
+	return pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		return insertActivity(ctx, tx, id, "member", &actorID, "note_added", map[string]any{"note": note})
+	})
 }
 
 type Activity struct {
-	ID           string          `json:"id"`
-	ActorType    string          `json:"actor_type"`
-	ActorID      *string         `json:"actor_id"`
-	ActivityType string          `json:"activity_type"`
-	Data         json.RawMessage `json:"data"`
-	CreatedAt    time.Time       `json:"created_at"`
+	ID           string          `json:"id" db:"id"`
+	ActorType    string          `json:"actor_type" db:"actor_type"`
+	ActorID      *string         `json:"actor_id" db:"actor_id"`
+	ActivityType string          `json:"activity_type" db:"activity_type"`
+	Data         json.RawMessage `json:"data" db:"data"`
+	CreatedAt    time.Time       `json:"created_at" db:"created_at"`
 }
 
 func (s *Service) Activities(ctx context.Context, orgID, id string) ([]Activity, error) {
 	if _, err := s.get(ctx, orgID, id); err != nil {
 		return nil, err
 	}
-	var items []ActivityItem
-	if err := s.Store.QueryAll(ctx, &dynamodb.QueryInput{
-		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :prefix)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": platform.S("FB#" + id), ":prefix": platform.S("ACT#"),
-		},
-	}, &items); err != nil {
-		return nil, err
+	rows, _ := s.DB.Query(ctx, `SELECT id, actor_type, actor_id, activity_type, data, created_at
+		FROM activities WHERE feedback_id = $1 ORDER BY id`, id)
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByName[Activity])
+	if out == nil {
+		out = []Activity{}
 	}
-	out := []Activity{}
-	for _, a := range items {
-		data := a.Data
-		if data == "" {
-			data = "{}"
-		}
-		out = append(out, Activity{ID: a.ActivityID, ActorType: a.ActorType, ActorID: a.ActorID,
-			ActivityType: a.ActivityType, Data: json.RawMessage(data), CreatedAt: a.CreatedAt})
-	}
-	return out, nil
+	return out, err
 }
 
 type Overview struct {
@@ -862,109 +730,39 @@ type Overview struct {
 	Trend    []map[string]any `json:"trend"`
 }
 
-// counted is all Overview reads of a row, and all the query asks DynamoDB for.
-// An Item carries the message and the raw context (up to contextMaxBytes
-// each): materialising a tenant's whole partition to count it — let alone
-// keeping it resident for the process lifetime — trades a read-capacity win
-// for an OOM.
-type counted struct {
-	ProjectID string    `dynamodbav:"project_id"`
-	Status    string    `dynamodbav:"status"`
-	Type      string    `dynamodbav:"type"`
-	CreatedAt time.Time `dynamodbav:"created_at"`
-}
-
-type cachedItems struct {
-	at   time.Time
-	rows []counted
-}
-
-// overviewTTL bounds how often the organization partition is read. The cache
-// is per instance, so two Lambdas can disagree for up to a minute.
-// ponytail: in-instance cache; move the counters into Streams-maintained
-// aggregate items if the partition read ever gets slow.
-const overviewTTL = time.Minute
-
-// Overview aggregates the organization's partition in memory: DynamoDB has no
-// GROUP BY, and the read is bounded by one tenant's data. An empty projectID
-// counts the whole organization; a set one counts just that project, so the
+// Overview aggregates the organization's feedback. An empty projectID counts
+// the whole organization; a set one counts just that project, so the
 // dashboard tiles agree with the inbox they sit above.
-//
-// The cache holds the rows, not the aggregate, and is keyed by organization
-// alone: scoping by project must not turn one partition read into one per
-// project every time someone uses the sidebar's switcher. Aggregating a slice
-// already in memory is cheap; re-reading the partition is not.
 func (s *Service) Overview(ctx context.Context, orgID, projectID string) (*Overview, error) {
-	rows, err := s.orgRows(ctx, orgID)
-	if err != nil {
+	var project any
+	if projectID != "" {
+		project = projectID
+	}
+	o := &Overview{ByStatus: map[string]int{}, ByType: map[string]int{}, Trend: []map[string]any{}}
+	rows, _ := s.DB.Query(ctx, `SELECT status, type, count(*) FROM feedback
+		WHERE organization_id = $1 AND ($2::uuid IS NULL OR project_id = $2)
+		GROUP BY status, type`, orgID, project)
+	var status, typ string
+	var n int
+	if _, err := pgx.ForEachRow(rows, []any{&status, &typ, &n}, func() error {
+		o.Total += n
+		o.ByStatus[status] += n
+		o.ByType[typ] += n
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
-	o := &Overview{ByStatus: map[string]int{}, ByType: map[string]int{}, Trend: []map[string]any{}}
-	perDay := map[string]int{}
-	cutoff := time.Now().UTC().AddDate(0, 0, -14)
-	for _, it := range rows {
-		if projectID != "" && it.ProjectID != projectID {
-			continue
-		}
-		o.Total++
-		o.ByStatus[it.Status]++
-		o.ByType[it.Type]++
-		if it.CreatedAt.After(cutoff) {
-			perDay[it.CreatedAt.Format("2006-01-02")]++
-		}
-	}
-	days := make([]string, 0, len(perDay))
-	for d := range perDay {
-		days = append(days, d)
-	}
-	sort.Strings(days)
-	for _, d := range days {
-		o.Trend = append(o.Trend, map[string]any{"day": d, "count": perDay[d]})
+	var day string
+	rows, _ = s.DB.Query(ctx, `SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, count(*)
+		FROM feedback
+		WHERE organization_id = $1 AND ($2::uuid IS NULL OR project_id = $2) AND created_at > $3
+		GROUP BY day ORDER BY day`, orgID, project, time.Now().UTC().AddDate(0, 0, -14))
+	if _, err := pgx.ForEachRow(rows, []any{&day, &n}, func() error {
+		o.Trend = append(o.Trend, map[string]any{"day": day, "count": n})
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return o, nil
-}
-
-// orgRows returns the counting fields of the organization's feedback, cached
-// for overviewTTL.
-func (s *Service) orgRows(ctx context.Context, orgID string) ([]counted, error) {
-	s.overviewMu.Lock()
-	if c, ok := s.overviewCache[orgID]; ok && time.Since(c.at) < overviewTTL {
-		s.overviewMu.Unlock()
-		return c.rows, nil
-	}
-	s.overviewMu.Unlock()
-
-	// Projected in the query, not after it: without this the whole partition —
-	// every message plus up to contextMaxBytes of context per row — is
-	// materialised in memory once a minute just to be counted, and paid for in
-	// read capacity. status and type are DynamoDB reserved words, hence the
-	// name placeholders.
-	var rows []counted
-	if err := s.Store.QueryAll(ctx, &dynamodb.QueryInput{
-		KeyConditionExpression:   aws.String("pk = :pk AND begins_with(sk, :prefix)"),
-		ProjectionExpression:     aws.String("project_id, #st, #ty, created_at"),
-		ExpressionAttributeNames: map[string]string{"#st": "status", "#ty": "type"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": platform.S("ORG#" + orgID), ":prefix": platform.S("FB#"),
-		},
-	}, &rows); err != nil {
-		return nil, err
-	}
-
-	s.overviewMu.Lock()
-	if s.overviewCache == nil {
-		s.overviewCache = map[string]cachedItems{}
-	}
-	// Sweep while the lock is held: entries are only ever overwritten on read
-	// of the same key, so a tenant that stops asking would otherwise stay
-	// resident for the life of the process.
-	for org, c := range s.overviewCache {
-		if time.Since(c.at) >= overviewTTL {
-			delete(s.overviewCache, org)
-		}
-	}
-	s.overviewCache[orgID] = cachedItems{at: time.Now(), rows: rows}
-	s.overviewMu.Unlock()
-	return rows, nil
 }

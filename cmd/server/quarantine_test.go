@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/SiyuQian/pinpost/internal/attachment"
-	"github.com/SiyuQian/pinpost/internal/platform"
 	"github.com/SiyuQian/pinpost/internal/project"
 	"github.com/google/uuid"
 )
@@ -22,9 +20,9 @@ func TestMaliciousAttachmentQuarantine(t *testing.T) {
 
 	attID := c.upload(wk, "evil.png", "image/png", evil)
 
-	var item attachment.Item
-	found, err := c.store.Get(context.Background(), "ATT#"+attID, platform.Meta, &item)
-	if err != nil || !found {
+	var item struct{ ScanStatus string }
+	err := c.db.QueryRow(context.Background(), `SELECT scan_status FROM attachments WHERE id = $1`, attID).Scan(&item.ScanStatus)
+	if found := err == nil; err != nil || !found {
 		t.Fatalf("attachment item: found=%v err=%v", found, err)
 	}
 	if item.ScanStatus != "flagged" {
@@ -54,8 +52,8 @@ func TestMislabeledAttachmentRejected(t *testing.T) {
 
 	attID := c.upload(wk, "notreally.png", "image/png", []byte("plain text pretending to be a png"))
 
-	var item attachment.Item
-	if _, err := c.store.Get(context.Background(), "ATT#"+attID, platform.Meta, &item); err != nil {
+	var item struct{ ScanStatus string }
+	if err := c.db.QueryRow(context.Background(), `SELECT scan_status FROM attachments WHERE id = $1`, attID).Scan(&item.ScanStatus); err != nil {
 		t.Fatal(err)
 	}
 	if item.ScanStatus != "rejected" {

@@ -261,3 +261,10 @@ func SessionToken(r *http.Request) string {
 func ConstantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
+
+// SweepExpiredSessions deletes sessions past their expiry. Lookups already
+// ignore them; this only keeps the table from growing.
+func (s *Service) SweepExpiredSessions(ctx context.Context) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM sessions WHERE expires_at < now()`)
+	return err
+}
