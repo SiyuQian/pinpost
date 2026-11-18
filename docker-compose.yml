@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: pinpost-postgres
+    environment:
+      POSTGRES_USER: pinpost
+      POSTGRES_PASSWORD: pinpost
+      POSTGRES_DB: pinpost
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pinpost -d pinpost"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - pinpost-db:/var/lib/postgresql
+
   dynamodb:
     image: amazon/dynamodb-local
     container_name: pinpost-dynamodb
@@ -32,4 +49,5 @@ services:
       - pinpost-objects:/data
 
 volumes:
+  pinpost-db:
   pinpost-objects:

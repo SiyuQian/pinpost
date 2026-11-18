@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/SiyuQian/pinpost/internal/platform"
+	"github.com/SiyuQian/pinpost/internal/platform/pgtest"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamotypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
@@ -31,7 +32,7 @@ func newLinkStore(t *testing.T) *platform.Store {
 	}
 	store := platform.NewStore(cfg, "pinpost-test")
 	if err := platform.EnsureTable(context.Background(), store); err != nil {
-		t.Skipf("dynamodb unreachable: %v", err)
+		pgtest.Unavailable(t, "dynamodb unreachable: %v", err)
 	}
 	return store
 }

@@ -25,6 +25,10 @@ func newLimiterStore(t *testing.T) *Store {
 	}
 	store := NewStore(cfg, "pinpost-test")
 	if err := EnsureTable(context.Background(), store); err != nil {
+		// pgtest.Unavailable, inlined: pgtest imports this package.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("dynamodb unreachable: %v (CI is set, so this fails instead of skipping)", err)
+		}
 		t.Skipf("dynamodb unreachable: %v", err)
 	}
 	return store
