@@ -115,12 +115,12 @@ func (rl *RateLimiter) Allow(key string) bool {
 	return rl.hits[key] <= rl.Limit
 }
 
-// ClientIP reports the address to attribute a request to. Behind CloudFront
-// and the Lambda Web Adapter, RemoteAddr is the adapter's loopback peer and is
-// the same for every request, so the leftmost X-Forwarded-For hop is the only
-// thing that identifies the caller. The header is only trustworthy because
-// nothing reaches this server except through the proxy; a direct caller can
-// forge it, which is acceptable for abuse counting and not for authorization.
+// ClientIP reports the address to attribute a request to. Behind a reverse
+// proxy, RemoteAddr is the proxy and is the same for every request, so the
+// leftmost X-Forwarded-For hop is the only thing that identifies the caller.
+// The header is only trustworthy when nothing reaches this server except
+// through the proxy (README, Self-hosting); a direct caller can forge it,
+// which is acceptable for abuse counting and not for authorization.
 func ClientIP(r *http.Request) string {
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		first, _, _ := strings.Cut(fwd, ",")

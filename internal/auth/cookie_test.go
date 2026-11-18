@@ -7,7 +7,7 @@ import (
 )
 
 // The Secure flag is decided by a forwarded header rather than r.TLS, because
-// the Lambda Web Adapter always hands this server a plain HTTP request.
+// the TLS-terminating reverse proxy hands this server a plain HTTP request.
 func TestSessionCookieSecure(t *testing.T) {
 	for _, c := range []struct {
 		name  string
