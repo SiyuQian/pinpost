@@ -1,263 +1,123 @@
 # Pinpost
 
-An embeddable cross-platform feedback system. See the design doc at [docs/feedback-system-design.md](docs/feedback-system-design.md); where it and the code disagree, the code wins.
+Pinpost is a self-hosted feedback inbox for web and mobile apps. Embed a feedback widget or use the API to collect bug reports, suggestions, ratings and attachments. Your team can search, assign and resolve reports in a shared dashboard.
 
-This repository implements **Phase 1** end to end as one self-hostable
-container: a Go modular monolith on **PostgreSQL**, **direct-upload
-attachments** on any S3-compatible store, an admin dashboard and attachment
-malware scanning with quarantine. `docker compose up` runs the server and its
-dependencies. The [Pinpost client SDKs](https://github.com/SiyuQian/pinpost-sdk)
-are maintained separately.
+This repository contains the Pinpost server, admin dashboard and HTTP API contract.
+
+- **Collect feedback** from your app using the HTTP API or a client SDK. Each project has its own write key and SDK settings.
+- **Triage reports** with inbox filters, bulk edits, internal notes, an activity timeline and submission trends.
+- **Connect other tools** with signed webhooks, delivery history and replay.
 
 ## Quick start
 
-To run Pinpost itself, see [Self-hosting](#self-hosting). To work on it:
+You need Git and Docker with Compose. Run these commands on your machine to build Pinpost and start it with PostgreSQL and RustFS.
 
 ```bash
-docker compose up -d --wait postgres s3   # Postgres (:5432) + RustFS (:9000)
-npm --prefix web/admin ci            # admin console dependencies (first run only)
-npm --prefix web/admin run build     # build the admin console into web/admin/dist
-source ./local.env                   # point the server at those two containers
-PINPOST_SEED_DEMO=1 go run ./cmd/server   # API + static pages (localhost:8787)
+git clone https://github.com/SiyuQian/pinpost.git
+cd pinpost
+export PINPOST_ADMIN_EMAIL=you@example.com
+export PINPOST_ADMIN_PASSWORD='replace-with-your-own-password'
+docker compose up -d --build
 ```
 
-`cmd/server` is an ordinary HTTP server. It applies database migrations on
-boot, creates the bucket when it is missing, and runs the background work
-(webhook delivery, attachment scanning, expiry sweeps) in the same process.
+Choose your own password before running the command. On a fresh database, Pinpost applies migrations and creates the first owner, organization and project. The Compose stack uses local ports **8787** for Pinpost, **5432** for PostgreSQL and **9000** for RustFS.
 
-The Go server serves the admin console from `web/admin/dist`, so build it once
-before the first boot. If you skip the build, `/admin/` explains what to run
-rather than 404ing. `go build` itself never needs Node.
-
-`PINPOST_SEED_DEMO=1` seeds the demo tenant below — its credentials are
-published here, so it is opt-in and must never be enabled in a deployment.
-
-| Item | Value |
-|---|---|
-| Submission demo | http://localhost:8787/demo/ |
-| Admin dashboard | http://localhost:8787/admin/ |
-| Admin account | `admin@example.com` / `pinpost-demo` |
-| SDK Write Key | `wk_demo_5f8a2c91d4e7b3a6f0c1` |
-
-## Configuration
-
-All optional; the defaults suit local development.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | — | **Required.** PostgreSQL connection URL, e.g. `postgres://pinpost:pinpost@localhost:5432/pinpost?sslmode=disable`. Migrations run on boot. |
-| `PINPOST_BUCKET` | `pinpost-attachments` | S3 bucket for attachments |
-| `S3_ENDPOINT_URL` | *(AWS S3)* | Endpoint of an S3-compatible store (RustFS, MinIO, R2). Uses path-style addressing and creates the bucket on boot if it is missing — or logs a warning if the keys cannot. |
-| `S3_PUBLIC_ENDPOINT_URL` | `S3_ENDPOINT_URL` | The address browsers reach object storage at, when it differs from the server's (inside docker compose the server uses `http://s3:9000`, browsers `http://localhost:9000`). Upload and download URLs are signed for it. |
-| `ADDR` | `:8787` | Listen address |
-| `PINPOST_RATE_LIMIT` | `60` | Ingestion requests per project+IP per minute, counted in memory per server process (two replicas allow twice as many). The IP is the leftmost `X-Forwarded-For` hop, falling back to the socket peer. |
-| `CORS_ALLOWED_ORIGINS` | *(any origin)* | Comma-separated origin allowlist for the public ingestion endpoints. The write key is public by design, so this is hygiene rather than a security boundary. Attachment bytes are not covered — they go straight to S3, whose own CORS configuration governs them. |
-| `PINPOST_SEED_DEMO` | `0` | Set to `1` for the demo tenant above. It also mounts `POST /dev/scan/{id}`, which scans one attachment immediately. Local development only. |
-| `PINPOST_GOOGLE_CLIENT_ID` | — | Google OAuth **web** client id. Empty disables Google sign-in and hides the button. |
-| `PINPOST_GOOGLE_ALLOWED_EMAILS` | — | Comma-separated Google addresses allowed to sign in. This is the access control: an allowed address gets an `admin` member record on first sign-in, anything else is rejected. Empty means nobody. |
-| `PINPOST_ADMIN_EMAIL` / `PINPOST_ADMIN_PASSWORD` | — | Provisions the first owner on an empty database. Ignored once seeding has run (the one row in the `bootstrap` table records it; `DELETE FROM bootstrap` allows a re-seed). With no `PINPOST_ADMIN_EMAIL`, the first allowlisted Google address is seeded as owner with no usable password. |
-| `PINPOST_ORG_NAME` / `PINPOST_PROJECT_NAME` | `Acme` / `Acme App` | Names for that first tenant |
-| `PINPOST_WRITE_KEY` | generated | Write key for that first project; the generated one is logged once at startup |
-
-## Layout
-
-Vertical slices: each feature package owns its HTTP handlers, business logic
-and data access; `cmd/server` only wires slices together.
-
-```
-api/                 # openapi.yaml (source of truth) + codegen config
-cmd/server/          # the one binary: migrations, seed, wiring, static files, background workers
-internal/
-  api/               # generated router/models (gen.go) + ServerInterface impl delegating to slices
-  auth/              # member sessions, roles, write keys
-  project/           # project/member queries, demo seed
-  feedback/          # creation, idempotency, cursor list, state machine, activities
-  attachment/        # presigned S3 uploads, post-upload verification, scanning
-  outbox/            # webhook endpoints, transactional outbox, delivery worker
-  platform/          # shared kernel: Postgres pool + migrations/, S3 client, error envelope, rate limiter
-web/admin/           # admin console: Vite + React + TypeScript + Tailwind + shadcn/ui
-web/demo/            # embedded feedback widget example (inline mini SDK)
-```
-
-## Admin console
-
-`web/admin/` is a Vite + React SPA styled with [shadcn/ui](https://ui.shadcn.com)
-(New York style, slate base): a data-table workbench over the feedback inbox,
-with each item's detail pane hosted in a Sheet so triage never loses the table
-behind it.
-
-Every piece of UI is composed from `src/components/ui/` — the shadcn registry
-components, added with `npx shadcn@latest add <name>` and owned in-tree. Feature
-components layer only tokens and copy on top: status and priority pills are
-`Badge` variants, the trend card is `Chart`, the login form is `Form` + `zod`,
-and destructive bulk edits go through `AlertDialog`. When something needs a new
-primitive, pull it from the registry rather than hand-rolling the markup.
+1. Sign in to the [admin dashboard](http://localhost:8787/admin/) with the account you configured.
+2. Open **嵌入与集成** (Embed & Integrations) and copy your project's write key.
+3. Replace the placeholder below and submit a report. It should appear under **反馈** (Feedback) in the dashboard.
 
 ```bash
-cd web/admin
-npm ci
-npm run dev      # localhost:5473, proxies /v1 to localhost:8787
-npm run build    # type-check + production build into dist/
+curl -fsS http://localhost:8787/v1/feedback \
+  -H 'X-Pinpost-Write-Key: paste-your-project-write-key' \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: readme-first-feedback' \
+  --data '{"type":"bug","message":"My first Pinpost report"}'
 ```
 
-Point the dev proxy elsewhere with `PINPOST_API_URL`. What it does today:
+Use a new idempotency key for each report. Reusing a key for the same project returns the original report. The write key is intended for client-side use and grants access to the ingestion API. Dashboard access uses a separate member session.
 
-- **Overview** — totals by status and type plus the 14-day submission trend,
-  from `/v1/analytics/overview`. The trend card is the only thing that pulls in
-  recharts (~100 kB gzipped), so it loads as its own chunk after the tiles paint.
-- **Inbox table** — cursor pagination, faceted filters (status / type /
-  assignee) with live counts, debounced full-text search, column visibility,
-  and client-side reordering of loaded rows by priority or rating.
-- **Bulk edits** — multi-select rows to change status or assignee. The API has
-  no batch endpoint yet, so these fan out to one `PATCH` per row and the toast
-  reports per-row successes and failures rather than assuming success. Only
-  status transitions legal for *every* selected row are offered.
-- **Detail sheet** — message, context, attachments with scan status, the
-  status / priority / assignee / tag controls, an internal note composer, and
-  the activity timeline. Saves send `updated_at` for optimistic concurrency; a
-  409 reloads the record and asks you to confirm instead of clobbering someone
-  else's edit.
-- **嵌入与集成** — the project's write key, an install snippet per SDK package
-  with the key and this origin filled in, and a live "waiting for the first
-  submission" check. The write key is a public identifier, so `GET
-  /v1/projects` returns it; owners/admins can rotate it with `POST
-  /v1/projects/{id}/write-key/rotate`, which revokes the old key in the same
-  write (every SDK still holding it gets 401).
+Run `docker compose down` to stop the stack and keep its data volumes.
 
-The status dropdowns only offer transitions the server state machine accepts
-(`open ⇄ in_progress → resolved → reopen; spam → open`), so the UI does not
-offer moves the API would reject.
+For the demo tenant used by the SDK integration tests, follow [Development](#development).
 
-## Client SDKs
+## Integrate Pinpost
 
-The MIT-licensed [Pinpost SDK repository](https://github.com/SiyuQian/pinpost-sdk)
-contains the client packages `@pinpost/core`, `@pinpost/react` and
-`@pinpost/react-native`. See that repository for setup, development and release
-instructions. The server API is defined in [`api/openapi.yaml`](api/openapi.yaml).
+- **HTTP API.** Use the [OpenAPI contract](api/openapi.yaml) to integrate from any language. The [quick start](#quick-start) includes a complete submission example.
+- **Client SDKs.** See [Pinpost SDK](https://github.com/SiyuQian/pinpost-sdk) for setup guides and examples for `@pinpost/core`, `@pinpost/react` and `@pinpost/react-native`. Open **嵌入与集成** (Embed & Integrations) in the dashboard for snippets with your Pinpost URL and project write key.
 
-## Webhooks
+### Attachments
 
-Feedback events (`feedback.created.v1`, `feedback.status_changed.v1`, `feedback.assigned.v1`, `feedback.note_added.v1`) are delivered to registered endpoints. Owners/admins manage endpoints via `POST/GET/PATCH/DELETE /v1/webhook-endpoints`.
+Clients request a presigned URL and upload directly to object storage. Pinpost accepts JPEG, PNG, WebP and plain text files up to 10 MiB each. The background worker uses signature-based scanning, and the dashboard allows downloads once the scan marks a file clean. Unclaimed upload records are swept after 24 hours. The corresponding objects remain in storage.
 
-- Requests are signed: `X-Pinpost-Signature: v1=hex(HMAC-SHA256(secret, "<X-Pinpost-Timestamp>.<body>"))`; the secret is returned once at creation.
-- Each event is written to the database in the same transaction as the change it reports, one pending delivery per subscribed endpoint, and the server's background worker sends it within a couple of seconds. Delivery is at-least-once, so consumers must be idempotent (dedupe on `X-Pinpost-Event-Id`, which retries and replays keep).
-- 5xx/408/429/network errors are retried after 1m, 5m, 30m, 2h, 6h and 12h — seven attempts over about 20 hours — then the delivery is marked `failed`. Other 4xx responses fail at once. A pending delivery shows its `next_attempt_at`.
-- 10 consecutive failures auto-pause an endpoint; deliveries for it queue while it is paused and go out once `PATCH {"status":"active"}` resumes it. Events that happen while it is paused are not queued. `POST /v1/webhook-deliveries/{id}/replay` re-sends a finished delivery without changing the event ID.
-- Delivery history is kept for 30 days.
+### Webhooks
 
-## API contract
+Owners and admins can manage subscriptions in the dashboard. Available events are `feedback.created.v1`, `feedback.status_changed.v1`, `feedback.assigned.v1` and `feedback.note_added.v1`.
 
-The API is spec-driven: [api/openapi.yaml](api/openapi.yaml) is the source of truth.
-
-- Routing and parameter parsing are generated by oapi-codegen (`internal/api/gen.go`); handlers implement the generated `ServerInterface`, so a spec change that isn't implemented fails to compile. Regenerate with `go generate ./internal/api`.
-- `go test ./cmd/server/` runs a contract test that exercises every spec operation against Postgres and RustFS, validates requests and responses with kin-openapi, and fails if any operation is left uncovered. Without those containers it skips locally; with `CI` set it fails instead, so CI can never pass by not running it.
-- CI blocks PRs that introduce breaking spec changes (`oasdiff breaking` vs the base branch) and rejects stale generated code.
-- Change flow: edit the spec first, regenerate, then implement — drift is caught at compile time or by the contract test.
-
-## API overview
-
-Ingestion (`X-Pinpost-Write-Key` header):
-
-- `GET  /v1/sdk/config` — fetch the published SDK config
-- `POST /v1/attachment-uploads` — request a presigned S3 PUT URL (≤10 MiB, jpeg/png/webp/txt); the client uploads straight to object storage
-- `POST /v1/feedback` — submit feedback; `Idempotency-Key` dedupes and returns the existing record
-
-Dashboard (session cookie):
-
-- `POST /v1/auth/login` `/logout`, `GET /v1/me`
-- `POST /v1/auth/google` (Google ID token → session; allowlisted addresses only), `GET /v1/auth/config` (public client id; empty means Google sign-in is off)
-- `GET  /v1/feedback` (status/type/assignee/q filters + cursor pagination)
-- `GET/PATCH /v1/feedback/{id}` (state machine open→in_progress→resolved / spam; optimistic concurrency via `updated_at`, 409 on conflict)
-- `POST /v1/feedback/{id}/notes`, `GET /v1/feedback/{id}/activities`
-- `GET  /v1/attachments/{id}/download` (only scan=clean; 302 to a 60-second presigned URL)
-- `GET  /v1/projects` `/members` `/analytics/overview`
-
-Organization-scoped reads and writes are filtered by `organization_id`, taken from the caller's session or write key (child records such as activities are reached only through their organization-checked parent), so reads outside the caller's organization return 404. See [Data model](#data-model) for how cross-organization references are prevented on writes and tested on reads.
-
-## Data model
-
-PostgreSQL, defined by the append-only migrations in
-[internal/platform/migrations/](internal/platform/migrations/), applied on boot.
-
-| Table | Holds |
-|---|---|
-| `organizations`, `bootstrap` | tenants; the one-row marker that seeding has run |
-| `projects` | write key (unique, a public identifier), SDK settings |
-| `members`, `sessions` | dashboard accounts; sessions keyed by the token's SHA-256 |
-| `feedback`, `activities` | reports (unique per project + idempotency key) and their timelines |
-| `attachments` | upload metadata, claim, scan status and scan queue |
-| `webhook_endpoints`, `webhook_deliveries` | subscriptions; pending deliveries are the outbox |
-
-Every organization-scoped query filters on the organization from the
-caller's session or write key. Composite foreign keys make cross-organization
-references impossible to write: feedback's project and assignee must belong to
-its organization, and an attachment can only be linked to feedback of its own
-project. Reads have no such backstop, which is what the cross-tenant tests in
-`cmd/server/authz_test.go` are for.
-
-IDs are UUIDv7, so "newest first with a cursor" is `ORDER BY id DESC` and the
-cursor is an id. Inbox filters and `q` search (`ILIKE`, with `%`/`_` matched
-literally) run inside one organization's rows on the `(organization_id, id)`
-index, and the overview is two `GROUP BY` queries. Above roughly 50k feedback
-items in one organization, add composite indexes such as
-`(organization_id, status, id)`, then `pg_trgm` for search.
-
-Nothing expires by TTL: every ten minutes the server deletes expired sessions,
-attachment rows unclaimed after 24 hours and delivery records older than 30
-days. Idempotency keys live with their feedback and never expire.
-
-## Boundaries
-
-- Attachment scanning is a signature scan (EICAR, executables, image polyglots), not an AV engine; the server's background worker runs it within a few seconds of a submission claiming the attachment, and the interface is where a real engine would slot in. Flagged and mislabeled files are stored but blocked from download. An attachment whose object never arrives is marked `rejected` after an hour.
-- **Verification is now after the fact.** A file whose real type does not match the declared one used to be refused with a 400 during upload; it now lands in the bucket and is marked `rejected`. Attachments are briefly `pending` — a status the dashboard shows and the download endpoint refuses.
-- Attachments are linked to feedback whether or not the scan has finished. The design gates the link on `upload_status = "uploaded"`, but the SDK can submit within milliseconds of the upload, and losing a user's feedback to that race is worse than showing a `pending` attachment; download is still gated on `clean`.
-- Objects whose feedback submission never arrived stay in the bucket. Their row is swept after 24 hours, so they are invisible and unreferenced; deleting the object in the same sweep is the upgrade when the orphan bytes cost something.
-- Email / one-tap screenshot / cross-restart offline queue are Phase 2.
+- Verify `X-Pinpost-Signature` against `v1=<hex HMAC-SHA256>`, computed with the endpoint secret over `<X-Pinpost-Timestamp>.<raw request body>`. Pinpost returns the secret when you create an endpoint.
+- Dedupe deliveries using `X-Pinpost-Event-Id`. Delivery is at least once, and retries and manual replays keep the same event ID.
+- Network errors and HTTP 408, 429 and 5xx responses are retried up to six times. Ten consecutive failures pause an endpoint. Already queued deliveries wait for it to resume. Events that occur during the pause are skipped. Delivery history is retained for 30 days.
 
 ## Self-hosting
 
-Pinpost is one container plus PostgreSQL (15 or newer) and an S3-compatible
-object store. `docker-compose.yml` runs all three:
+Pinpost runs as one application container with PostgreSQL and an S3-compatible object store. The container serves the API and dashboard and runs the webhook and attachment workers. The supplied [Compose file](docker-compose.yml) bundles PostgreSQL and RustFS for a local installation.
+
+For an internet-facing installation:
+
+- Put Pinpost behind an HTTPS reverse proxy and restrict direct access to the app and database ports. Have the proxy set `X-Forwarded-Proto: https` for secure session cookies and overwrite `X-Forwarded-For` with the trusted client address for rate limiting.
+- Replace the sample database and RustFS credentials. Use your own owner password and leave demo seeding disabled.
+- Set `S3_PUBLIC_ENDPOINT_URL` to the HTTPS object storage endpoint the browser can reach. Configure allowed app origins in both `CORS_ALLOWED_ORIGINS` and your object store's CORS rules.
+- Back up PostgreSQL and the attachment bucket together. The database stores references to the objects.
+
+Check [`/healthz`](http://localhost:8787/healthz) to confirm the server can reach PostgreSQL.
+
+### Environment variables
+
+These variables configure the Pinpost process. The supplied Compose file sets or forwards the variables listed under the `pinpost` service. Use a Compose override to pass additional settings to the container.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | Required | PostgreSQL connection URL. Migrations run on startup. |
+| `ADDR` | `:8787` | HTTP listen address. |
+| `PINPOST_ADMIN_EMAIL`, `PINPOST_ADMIN_PASSWORD` | — | First owner credentials. They apply only before the database has been bootstrapped. |
+| `PINPOST_ORG_NAME`, `PINPOST_PROJECT_NAME` | `Acme`, `Acme App` | Names for the first organization and project. |
+| `PINPOST_WRITE_KEY` | Generated | Optional initial project write key. |
+| `PINPOST_BUCKET` | `pinpost-attachments` | Bucket for attachments. With a custom endpoint, Pinpost attempts to create the bucket at startup. |
+| `S3_ENDPOINT_URL` | AWS S3 | Server-side S3-compatible endpoint. Setting it enables path-style addressing. |
+| `S3_PUBLIC_ENDPOINT_URL` | Server endpoint | Browser-facing endpoint used to sign upload and download URLs. |
+| `AWS_REGION` | `us-east-1` | Object storage region. Credentials use the AWS SDK's standard provider chain. |
+| `CORS_ALLOWED_ORIGINS` | Any origin | Comma-separated browser origins for the ingestion API. Object storage has its own CORS settings. |
+| `PINPOST_RATE_LIMIT` | `60` | Ingestion requests per project and IP per minute, counted separately by each replica. |
+| `PINPOST_GOOGLE_CLIENT_ID`, `PINPOST_GOOGLE_ALLOWED_EMAILS` | — | Google OAuth web client ID and comma-separated sign-in allowlist. For Google-only setup, leave the owner credentials unset. The first allowed address becomes the owner on a fresh database. |
+| `PINPOST_SEED_DEMO` | `0` | Set to `1` for the local demo tenant and development scan endpoint. |
+
+## Development
+
+Use Go 1.25.6 or newer, Node.js 22 as used in CI, and Docker Compose. Run the commands from the repository root. Stop the full Compose stack first if it is running locally on port 8787.
 
 ```bash
-export PINPOST_ADMIN_EMAIL=you@example.com PINPOST_ADMIN_PASSWORD='choose-a-long-one'
-docker compose up -d
+docker compose up -d --wait postgres s3
+npm --prefix web/admin ci
+npm --prefix web/admin run build
+source ./local.env
+PINPOST_SEED_DEMO=1 go run ./cmd/server
 ```
 
-Then open http://localhost:8787/admin/ and sign in. The first boot creates the
-schema and the first owner, organization and project; later boots apply new
-migrations and leave existing data alone. The project's write key is on the
-console's 嵌入与集成 page.
+On a fresh local database, demo mode creates `admin@example.com` with password `pinpost-demo`. Submit feedback at [`/demo/`](http://localhost:8787/demo/) and sign in at [`/admin/`](http://localhost:8787/admin/) to see it. The demo uses a fixed write key and is intended for local development.
 
-To put it on a server:
+For dashboard hot reload, keep the Go server running and use `npm --prefix web/admin run dev`. Open [`localhost:5473/admin/`](http://localhost:5473/admin/). Vite proxies API requests to port 8787 by default. Set `PINPOST_API_URL` to use another API origin.
 
-- Put an HTTPS reverse proxy (Caddy, nginx, a load balancer) in front of port
-  8787. Session cookies are marked `Secure` when the proxy sends
-  `X-Forwarded-Proto: https`, and the rate limiter reads the client address from
-  `X-Forwarded-For` — so do not expose 8787 directly.
-- Browsers upload attachments straight to object storage. Publish RustFS (or
-  point at your own store) under an address browsers can reach, set
-  `S3_PUBLIC_ENDPOINT_URL` to it, and allow your sites' origins in the store's
-  CORS rules.
-- Replace the compose file's sample database and RustFS credentials.
-- Back up Postgres (`pg_dump`, or your provider's snapshots) and the bucket
-  together: feedback rows reference attachment objects by key.
-- Several replicas can share one database: migrations take an advisory lock,
-  and webhook delivery and scanning claim rows with `SKIP LOCKED`. The ingest
-  rate limit is counted per replica.
+| Path | Contents |
+| --- | --- |
+| [`cmd/server/`](cmd/server/) | Go entry point, static pages and contract tests |
+| [`internal/`](internal/) | Go feature packages and [PostgreSQL migrations](internal/platform/migrations/) |
+| [`web/admin/`](web/admin/) and [`web/demo/`](web/demo/) | React dashboard and browser submission demo |
+| [`api/openapi.yaml`](api/openapi.yaml) | API contract for SDK ingestion and dashboard operations |
+| [System design](docs/feedback-system-design.md) | Architecture, design decisions and roadmap (Chinese) |
 
-On AWS, run the same image on ECS, App Runner or Lightsail with RDS and S3.
-The earlier serverless stack (Lambda + DynamoDB, Terraform) is preserved at the
-`aws-lambda-dynamodb` git tag.
+For tests and contribution steps, see [CONTRIBUTING.md](CONTRIBUTING.md). If you change the OpenAPI spec, regenerate the Go router and types with `go generate ./internal/api`.
 
 ## License
 
-Pinpost is © DE TECHNOLOGY LIMITED.
+Pinpost is © DE TECHNOLOGY LIMITED. This repository is licensed under [AGPL-3.0-only](LICENSE). The client SDKs are licensed under [MIT](https://github.com/SiyuQian/pinpost-sdk/blob/main/LICENSE) and can be embedded in closed-source apps.
 
-- This project is licensed under the
-  [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
-- The [client SDKs](https://github.com/SiyuQian/pinpost-sdk) are licensed under the
-  [MIT License](https://github.com/SiyuQian/pinpost-sdk/blob/main/LICENSE).
-
-Contributions require signing the [Contributor License Agreement](CLA.md); see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions require a [Contributor License Agreement](CLA.md). Report vulnerabilities privately using the instructions in [SECURITY.md](SECURITY.md).
